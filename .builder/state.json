@@ -1,0 +1,233 @@
+{
+  "schema_version": 1,
+  "project_path": ".",
+  "phase": "G",
+  "phase_started_at": "2026-05-01T18:00:00Z",
+  "phase_a_completed_at": "2026-04-26T10:30:00Z",
+  "phase_b_completed_at": "2026-04-26T11:45:00Z",
+  "phase_c_completed_at": "2026-04-26T17:00:00Z",
+  "phase_d_completed_at": "2026-04-26T19:10:00Z",
+  "phase_e_completed_at": "2026-04-26T20:05:00Z",
+  "phase_f_completed_at": "2026-04-29T18:00:00Z",
+  "phase_g_completed_at": "2026-05-02T12:25:00Z",
+  "tasks_total_in_phase": 7,
+  "tasks_completed_in_phase": 7,
+  "current_task": null,
+  "next_task": "WAITING_ON_E0_AND_TAURI_DRIVER_AND_TESTERS",
+  "drift": {
+    "blocker_count": 0,
+    "non_blocker_count": 20,
+    "last_check_at": "2026-05-02T12:20:00Z",
+    "notes": "Open drift: D-001, D-002, D-004 to D-020 (19) plus NB-G-2 (debug NFR harness — partial; perf budgets asserted, regression-rate telemetry deferred). NB-G-1 closed at 82ca9cf (Tier 2 cap restored to 3). NB-G-3 closed at f3a86b9 (phase-boundary auto-trigger half shipped). Phase G EXIT recheck PASSED at 12:20:00Z; ready for human boundary approval. The five recheck-recommended corrections all landed (#1 cap bump, #2 ADR-0014 cite verified, #3 Playwright harness scaffolded with Tauri-driver path tracked under D-004, #4 phase-boundary auto-scan, #5 §6 NFR budgets enforced)."
+  },
+  "tests": { "passing": 945, "failing": 0, "skipped": 0, "breakdown": "824 TS unit + 77 TS integration + 44 Rust unit" },
+  "cost_so_far_usd": 0.0,
+  "tokens": { "input": 0, "output": 0 },
+  "history": [
+    {
+      "task_id": "G-recheck-fixes",
+      "completed_at": "2026-05-02T12:25:00Z",
+      "commit": "a0cd3cb",
+      "notes": "Phase G EXIT recheck five-correction batch. (1) 82ca9cf — restored Tier 2 cap to 3 attempts to match Flow L AC6 + source spec §E.4 (was 2 in v1; closed NB-G-1). (2) Verified ADR-0014 already cites Flow K AC4/AC9/AC11 from D-038 housekeeping. (3) 1b683c4 — scaffolded Playwright E2E harness (playwright.config.ts + tests/e2e/smoke.spec.ts + README.md); webview-only smoke covers Next 404; Tauri-driver path with @tauri-context tags awaits D-004 install. (4) f3a86b9 — auto-trigger Debug scan on review.md phase boundary (Flow L AC1 half; gating-modal half still D-015). (5) a0cd3cb — tightened §6 NFR budgets in the integration test (≤5s Layer 1, ≤30s validate=true). corepack pnpm verify GREEN: 824 unit + 77 integration. Phase G: 7/7 — boundary self-check PASSED."
+    },
+    {
+      "task_id": "G-summary",
+      "completed_at": "2026-05-02T11:50:00Z",
+      "commit": "f99eed1",
+      "notes": "Phase G complete in 23 commits (38d730f → f99eed1) across G1-G7. G1 spec amendment + ADR-0007 + defects schema. G2a/refactor/G2b-1/G2b-2/G2c — Layer 1: 6 detectors (secret-regex, tsc, hallucinated-import, rls-missing, client-side-auth, env-leak) + scan handler + Lovable RLS E2E fixture. G3a/G3b/G3c — software graph: routes + schema + auth model + buildGraph + debug.graph handler. G4a/G4b/G4c/G4d — Layer 2 LLM validator: subgraph slice + prompt + driver + handler integration + webview wire types + E2E with stub transport. G5a/G5b/G5c/G5d — repair pyramid: branch isolation + Tier 1 codemods (extract-secret, add-rls-migration) + applyFix handler + Tier 2 LLM-with-retry-once. G6a/G6b — UI: right-rail Debug panel + DebugCard + Deploy gate modal hooked into Flow I. G7a/G7b/G7d/G7c — Tier 3 explainer + 7-day rollback + prompt-injection adversarial test suite + slopsquat detector (opt-in). corepack pnpm verify GREEN: 824 unit + 76 integration. Two Tauri-related items remain partial: D-004 (tauri-driver E2E) and D-015 (phase_complete MCP tool + approval modal); both have clear next steps."
+    },
+    {
+      "task_id": "F-summary",
+      "completed_at": "2026-04-29T18:00:00Z",
+      "commit": "b16d508",
+      "notes": "Phase F novice-readiness hardening per build-order. Eight slices F1-F8: SDK-sidecar chat/build, reliable Stop, echo-back gating, Q1-Q35 validation (Q33-Q35 added in D-023), file approval with PII review, approved source-material injection, concrete target-app rules + Corepack scripts, doc/ADR alignment. Plus the post-F slice batches D-023..D-037 (six post-Phase-F slices in ac533fc; D-031..D-037 in 9cdcb94 covering visual feedback + demo build). Closed by D-022."
+    },
+    {
+      "task_id": "E6",
+      "completed_at": "2026-04-26T20:01:00Z",
+      "commit": "08cce5a",
+      "notes": "Marketing site per build-order E6. Real download links + screen recording deferred per drift D-020 (depend on Phase E0 signed installers + a real demo capture). New apps/marketing/ — minimal Next.js 15 + React 19 + Tailwind sibling project; NOT a pnpm workspace member; install + run via `pnpm install && pnpm dev` inside the dir; serves on port 3001 to avoid clashing with the root Builder dev server. app/page.tsx: hero (title + subtitle) + 90s-demo placeholder block + three download cards (macOS/Windows/Linux) gated on DOWNLOAD_LINKS_PENDING flag (currently true; flip when E0 ships). Three 'what you get' feature cards. Footer with GitHub link. Root tsconfig.json + eslint.config.js excludes apps/marketing so the Builder's strict mode doesn't trip on the marketing site's looser settings. pnpm verify GREEN (246 unit + 60 integration + 44 Rust = 350; no new tests — marketing is presentational). Phase E: 6/6 — boundary self-check next."
+    },
+    {
+      "task_id": "E5",
+      "completed_at": "2026-04-26T19:55:00Z",
+      "commit": "85beb46",
+      "notes": "Sentry consent capture per O7 + spec §6 + §8 default. Full SDK integration deferred to D-019; E5 ships everything needed so the SDK can be wired without re-architecting the gating logic. lib/telemetry: getSentryDecision/setSentryDecision via localStorage; hasMadeSentryDecision; reportError(error) no-op shim that always honours the consent decision (cannot leak PII before consent — a Proxy-trapped error payload is not even read when decision is missing or not 'accepted'). 16 unit tests cover persistence + the privacy guarantee. app/components/sentry-prompt.tsx: Alert with Yes/No/Ask later buttons + a brief disclaimer naming what we will (error itself, throwing line) and won't (chat content, spec.md, project paths, uploaded files) send. Dashboard triggers the prompt once on the first `done` event since mount, gated on hasMadeSentryDecision() being false; decision persists across reloads via localStorage. pnpm verify GREEN (246 unit + 60 integration + 44 Rust = 350). Phase E: 5/6."
+    },
+    {
+      "task_id": "E4",
+      "completed_at": "2026-04-26T19:50:00Z",
+      "commit": "51af9f3",
+      "notes": "Optional spend cap. Reconciles build-order E4 ('daily cap, soft warn 50%, hard stop 100%') with spec.md §6 explicit 'No hard daily spend cap is enforced by the Builder' + L23 override (per ADR-0002 the claude CLI's underlying account governs throttling). Default: cap off (spec-aligned); novice opts in via a small input in the dashboard footer. lib/cost-ceiling/index.ts: pure evaluate(spent, cap) returning {state: off|ok|warn|stop, percent, message}; default state is 'off'; soft warn at >=50%, hard stop at >=100%. Defensive: NaN/negative spent treated as zero; null/undefined/<=0 cap returns 'off'. localStorage helpers (read/write/remove/scope-by-id). 22 unit tests cover all branches + storage. Dashboard footer: small <input type='number'> for the cap (USD); persists per-project to localStorage so a reload preserves it without a DB migration. Above-tail Alert when state is warn (default variant) or stop (destructive); Start build button disabled when stop. Drift D-018 logged: 'daily' → 'lifetime' (existing costs.sumByProject returns lifetime total) + localStorage instead of DB column. Both deferred to follow-up if a real use case appears. pnpm verify GREEN (230 unit + 60 integration + 44 Rust = 334). Phase E: 4/6."
+    },
+    {
+      "task_id": "E3",
+      "completed_at": "2026-04-26T19:43:00Z",
+      "commit": "bc2ed73",
+      "notes": "Tauri auto-updater wiring per Flow J AC1-AC3 + build-order E3. Phase E0 deferred per human direction 2026-04-25 → no real signing artefacts; E3 ships everything but the pubkey + endpoint, which become two-string swaps in tauri.conf.json when E0 lands. Cargo dep tauri-plugin-updater 2 (resolves 2.10.1); npm dep @tauri-apps/plugin-updater 2.9.0. Plugin registered in lib.rs setup; capabilities/default.json grants updater:default. tauri.conf.json gets bundle.createUpdaterArtifacts: true + plugins.updater config with placeholder pubkey REPLACE_WITH_TAURI_SIGNER_PUBKEY_FROM_PHASE_E0 and stub endpoint. lib/updater/index.ts wraps check() + downloadAndInstall() with neverthrow; recognises the placeholder-pubkey error pattern and translates it to a NotConfigured variant; checkForUpdateQuiet() swallows that variant so the launch flow doesn't nag the novice while E0 is pending. 11 unit tests cover all three branches + error class translation. New app/components/update-prompt.tsx: Alert with 'Install and restart' / 'Later' buttons. Mounted at the top of the Welcome page; runs the quiet check on mount. Drift D-017 logged. pnpm verify GREEN (208 unit + 60 integration + 44 Rust = 312). Phase E: 3/6."
+    },
+    {
+      "task_id": "E2",
+      "completed_at": "2026-04-26T19:36:00Z",
+      "commit": "bb8fced",
+      "notes": "GitHub export via gh CLI per Flow I AC8 + build-order E2. New src-tauri/src/export.rs: gh_is_installed (mirrors vercel/cli probes) + gh_export spawns `gh repo create <name> --private --source=. --remote=origin --push` in expanded project_path. Auth handled entirely by gh's own `gh auth login`; the Builder never sees a GitHub token. Pure parse_repo_url picks the first https://github.com/<owner>/<repo> token from combined stdout+stderr; rejects bare host with no path. Repo-name validation matches GitHub's [A-Za-z0-9_.-] rule, max 100. Error message includes a 'run gh auth login' hint when CLI complains about auth/not-logged-in. 6 Rust unit tests cover URL parsing edges (simple, bare-host-rejection, multi-URL first-wins, trailing punctuation, none-present, hyphen+underscore+digit subpaths). lib/export/index.ts: sanitiseRepoName lowercases + hyphenates whitespace + strips invalid + clamps to 100 + trims leading/trailing punctuation; novice can type 'PrepPilot' and get 'preppilot'. exportToGithub composes sanitise → CLI → audit row in one Result chain; audit insert failure does not fail the export. 9 unit tests cover sanitiser, probe, invalid name, happy path with audit, audit-fail-but-ok, CLI error with auth-hint pass-through. Dashboard adds a 'Push to GitHub' button using GitBranch icon (lucide-react has no Github brand mark). Same success/error banner pattern as Deploy + clipboard write of the URL. pnpm verify GREEN (197 unit + 60 integration + 44 Rust = 301). Phase E: 2/6."
+    },
+    {
+      "task_id": "E1",
+      "completed_at": "2026-04-26T19:30:00Z",
+      "commit": "34781fd",
+      "notes": "Vercel deploy flow per Flow I AC1-AC6 + build-order E1. New src-tauri/src/deploy.rs: vercel_is_installed (mirrors cli_is_installed for the claude probe; which/where + --version exit code) and vercel_deploy spawns `vercel deploy --yes` in expanded project_path with VERCEL_TOKEN injected from the keychain. Pure parse_preview_url picks the LAST https://*.vercel.app token from combined stdout+stderr (vercel uses stderr for progress in v32+, stdout for the final URL in older versions), strips trailing punctuation. 7 Rust unit tests cover URL parsing edge cases (simple, trailing punctuation, multi-URL last-wins, none-present, non-vercel-https-ignored, hyphen+digit subdomains, surrounding whitespace). DeployResult uses #[serde(rename_all = 'camelCase')] so the webview gets previewUrl. New lib/deploy: getVercelToken/setVercelToken namespace the keychain entry under com.airtec.builder.vercel/default per ADR-0003. deployToVercel composes keychain → CLI → audit row in one Result chain; audit insert failure does NOT fail the deploy (URL is the load-bearing thing). 9 unit tests cover: missing token, happy path with audit, audit-fail-but-deploy-still-ok, CLI errors, keychain backend errors, isVercelInstalled three branches. New app/build/components/deploy-modal.tsx: Base UI Dialog (focus trap, escape key, backdrop) with password input + 'Where do I get this?' link to vercel.com/account/tokens; token goes straight to the keychain, never logged or displayed back. Dashboard adds a Deploy button (next to Stop). Click flow: probe vercel CLI → check keychain → modal if missing → run deploy → success banner with the URL + clipboard write via the standard Clipboard API. Error banner on failure with CLI stderr. pnpm verify GREEN (188 unit + 60 integration + 38 Rust = 286). Phase E: 1/6."
+    },
+    {
+      "task_id": "D6",
+      "completed_at": "2026-04-26T19:05:00Z",
+      "commit": "93956f0",
+      "notes": "Pause / resume / stop / crash recovery (Flow H AC1-4). New current_session_id column on projects (migration 0006_busy_avengers.sql) so resume can pass --resume <id> across app restarts. New projects.setStatus handler — optional currentSessionId/currentPhase patches only when caller provides them, so a status flip doesn't blank a previously-saved session id. New OrchestratorState (Rust): Mutex<Option<Child>> holding the in-flight build subprocess; orchestrator_start hands the child INTO state on spawn and takes it back OUT for stderr+wait at exit (if orchestrator_stop already pulled it, the read loop sees EOF and returns cleanly). New orchestrator_stop Tauri command + lib/orchestrator wrapper (2 unit tests: happy path + transport error). Dashboard wires it: Pause = orchestratorStop + setStatus(paused) preserving session id; Resume = startBuild reads sessionIdRef and passes --resume; Stop = orchestratorStop + setStatus(ready, currentSessionId: null) so next start is fresh. Crash recovery: on mount, if project.status === 'building' the previous app process died mid-build (the only writer of 'building' is startBuild); flips to 'paused' + shows 'Recovered from crash' banner. Session id from claude's session event persisted via setStatus(currentSessionId) immediately so a hard kill mid-turn still leaves a resumable session. Drift: kill-mid-task integration test deferred to Phase E with rest of D-004 (needs the fixture-claude binary); setStatus + sessionId persistence half covered by 3 new sidecar-projects integration tests. pnpm verify GREEN (179 unit + 60 integration + 31 Rust = 270). Phase D: 6/6 — boundary self-check next."
+    },
+    {
+      "task_id": "D5",
+      "completed_at": "2026-04-26T18:55:00Z",
+      "commit": "e8bca5a",
+      "notes": "Drift banner + drift_events table + drift-log writer. Closes Flow G AC2 + AC3 (banner shows drift item with 3 resolution buttons; choice persists DB row + drift-log.md line). Phase boundary modal (D5 second build-order bullet) and orchestrator-side report_drift MCP tool deferred to a follow-up so this fits a single slice; D5 ships an 'Inject drift' dev button on the dashboard header that exercises the full path. New `drift_events` table per spec §4 (id, project_id, phase, kind enum, description, resolution enum nullable, commit_hash, occurred_at, resolved_at). Migration 0005_abnormal_leech.sql. Handlers drift.append + drift.resolve + drift.listOpen (resolution IS NULL filter, oldest-first so the banner shows the head of the queue). New Tauri command append_drift_log_line writes a markdown block to {project}/docs/drift-log.md (path-sandboxed; seeds the file with the same header the Builder's own log uses); includes a small std::time-only iso8601 formatter (no chrono dep added). New lib/drift wrapper composes the two-step resolve flow: sidecar DB update FIRST then file-line append; if file write fails the DB update still landed (the row IS the source of truth). 9 unit tests cover dispatcher ordering, forwarded params, DB-first guarantee, partial-success error path. New app/build/components/drift-banner.tsx: destructive Alert with Revert/Change spec/Accept buttons, per-button loading spinner, soft-fail message. Dashboard polls drift.listOpen on mount + after every `done` event so banners surface as soon as claude eventually calls report_drift. 6 drift integration tests. pnpm verify GREEN (177 unit + 57 integration + 31 Rust = 265). Phase D: 5/6."
+    },
+    {
+      "task_id": "D4",
+      "completed_at": "2026-04-26T18:25:00Z",
+      "commit": "340bd7a",
+      "notes": "Cost meter + ETA estimator. Closes Flow F AC4 (cost meter from claude usage data) and v1 of Flow F AC3 (ETA via kit §14.5.3). New `costs` table per spec §4 (id, project_id, ts, model, input_tokens, output_tokens, usd_cents — usd_cents stored as INTEGER so SUM stays exact; orchestrator's float total_cost_usd → round(*100)). Migration 0004_big_wiccan.sql. Handlers `costs.append` + `costs.sumByProject` (one-row aggregate for the meter via Drizzle sql\\`sum(...)\\` + count(*)). New lib/eta: pure (observations[], elapsedMs) → {medianMs, p90Ms, sampleSize, mode} where mode flips estimating (n<3) → normal (NIST type-7 percentile) → past_p90 (elapsed > p90, the honesty fallback). In-progress unit deliberately NOT folded into the percentile sample — would skew its own estimate. formatEta renders 'estimating…' / 'less than a minute' / '~12 min' / '~1 hr 7 min' / 'more than expected'. 14 unit tests cover percentile maths, mode transitions, NaN/Infinity filtering, formatter branches. Dashboard footer reads costs.sumByProject on mount + after every `done` event; records one elapsed-time observation per `done`, runs estimator live. Status line shows real $ + token totals + per-turn ETA. Drift D-014 logged: ETA observed at TURN granularity (not per-task) until D5 wires phase markers; the estimator function does not change when D5 swaps the observation source. 5 costs integration tests. pnpm verify GREEN (168 unit + 51 integration + 31 Rust = 250). Phase D: 4/6."
+    },
+    {
+      "task_id": "D3",
+      "completed_at": "2026-04-26T17:58:00Z",
+      "commit": "34b0bea",
+      "notes": "Build dashboard layout per kit §14.5.1. New route /build?project=<id> with header (project name + path + Start/Pause/Stop trio; Pause/Stop are D6 stubs), phase bar (computes pct = tasks_completed_in_phase / tasks_total_in_phase from state.json), recent-history sidebar (last 8 task ids reversed), live tail (auto-scrolling list of human-translated action lines with raw input below in mono), status footer (status + phase + cost/ETA placeholders for D4 + back-to-interview link). Reads existing artefacts on mount: sidecarCall(projects.get) for project, then readTargetState({project}/.builder/state.json) and readHistoryLogTail({project}/.builder/history.log, 200) so a paused project shows everything populated even before the orchestrator emits a new event. Start build button spawns the orchestrator; new tool_use events get translated and OPTIMISTICALLY appended to the live tail (sub-200ms latency budget per Flow F AC2; sidecar persists in parallel via actions.append). New Tauri commands read_target_state + read_history_log_tail in src-tauri/src/lib.rs path-sandbox to {project}/.builder/ (binding rule 5); 16 MB cap on history.log; both return Ok(None)/Ok([]) for missing files. New lib/build-state with Zod-validated readers (passthrough on TargetState for forward-compat; silently drops malformed history.log lines from a partial-write); 10 unit tests cover happy paths + missing file + malformed JSON + transport errors. Interview-page right aside no longer has the D1/D2 dev panel — replaced by an 'Open Build dashboard' Link styled via buttonVariants. .gitignore tightened: `dist/` and `build/` are now anchored (`/dist/`, `/build/`) so the new app/build/ route folder is tracked (was silently masked by the unanchored `build/` rule; caught by git status post-commit). pnpm verify GREEN (154 unit + 46 integration + 31 Rust = 231). Phase D: 3/6."
+    },
+    {
+      "task_id": "D2",
+      "completed_at": "2026-04-26T17:50:00Z",
+      "commit": "956f0d1",
+      "notes": "Tool-call translation + actions/history.log persistence per kit §14.5.2 + binding rule 7. New lib/orchestrator/translate.ts: pure (tool, rawInput) → humanLine for the built-in Claude Code tools (Bash with description-first formatting, Read/Edit/Write showing basename, Glob/Grep with pattern + optional path, Task with subagent type + description, WebFetch/WebSearch/TodoWrite/NotebookEdit/ExitPlanMode/BashOutput/KillBash) plus an MCP-prefix handler that strips `mcp__<server>__` and a generic '<tool>(<key>: <val>)' fallback. Defensive: trims to 140 chars with ellipsis suffix; never throws on malformed JSON; safe property access throughout. 19 unit tests cover every branch + edge cases (long lines, MCP prefix, missing fields, malformed JSON, multi-line Bash). sidecar/src/handlers/actions.ts extended: AppendParamsSchema accepts optional historyLogPath; when set, the inserted row is mirrored as a JSON line to that file (mkdir -p the parent dir on demand). Best-effort write — failures log to stderr but never roll back the DB row (a missed log line is recoverable; losing the action would not be). 3 new integration tests assert: line lands when path provided, parent dir auto-created, DB insert survives mkdir failure. Interview-page dev panel translates each tool_use, persists via sidecarCall(actions.append) with historyLogPath = {project}/.builder/history.log, and shows humanLine above raw input. New local DevOrchestratorEvent type enriches OrchestratorEvent.tool_use with humanLine; D3 builds the proper dashboard on top. pnpm verify GREEN (144 unit + 46 integration + 31 Rust = 221). Phase D: 2/6."
+    },
+    {
+      "task_id": "D1",
+      "completed_at": "2026-04-26T17:35:00Z",
+      "commit": "8ed8c5b",
+      "notes": "Orchestrator subprocess. New src-tauri/src/orchestrator.rs spawns the `claude` CLI inside the novice's project folder (current_dir = projectPath, expanded for ~/) with --output-format stream-json --verbose --model sonnet, optional --resume <session_id>. Kickoff prompt asks claude to read CLAUDE.md and emit a `## Plan` section satisfying build-order D1 AC. Pure parser parse_orchestrator_line returns Vec<OrchestratorEvent> (Session | AssistantDelta | ToolUse | Done | RateLimit | Error); differs from chat.rs's parser by emitting ToolUse for EVERY tool, not just our offer_options UI tool — the dashboard's live tail and the new actions table need the full surface. 15 Rust unit tests cover parser variants (text, single+multi tool_use, missing input, missing name, result usage, malformed JSON, rate-limit detection). lib/orchestrator/index.ts wraps the Tauri command with a Channel-based ResultAsync<void, OrchestratorError>; 6 TS unit tests with mocked Channel + invoke. New `actions` table per spec.md §4 (id ULID, project_id FK, ts, tool, raw_input verbatim JSON-as-string, human_line + phase + task_id all nullable until D2 / D5 fill them in); migration 0003_tan_vindicator.sql; sidecar handlers actions.append + actions.list with cursor pagination by ts (B10 default). 7 integration tests via temp-DB sidecar harness. Dev-only `Start build (test)` button on the interview-page right aside lets us verify the AC live; replaced by the proper Build dashboard at D3. pnpm verify GREEN (125 unit + 43 integration TS + 31 Rust). Phase D: 1/6."
+    },
+    {
+      "task_id": "C8",
+      "completed_at": "2026-04-26T16:55:00Z",
+      "commit": "a0c1c27",
+      "notes": "Ingestion contract UI. New Tauri command file_save_uploaded (base64 0.22 added to Cargo.toml; 25 MB cap; name validation rejects path separators / leading dots / .. ; mkdir inputs/ on demand; refuses overwrite; canonicalises return path). New lib/files/ingest.ts orchestrator: readFileAsBase64 (chunked to avoid call-stack overflow on large files) → file_save_uploaded → callExtractor (dispatches by IngestedFileKind to files.extractText / summariseImage / parseSchema / parseDataSample) → files.guardPii on text outputs. Returns IngestResult {summary, hasPiiWarning, storedPath} via ResultAsync<_, IngestError>. FilePanel.onDrop signature widened to (newFiles, rawFiles); interview page kicks off ingestFile per file in parallel and updates each row's status icon (Loader during processing, CheckCircle/AlertTriangle on done depending on PII verdict, XCircle on error) + statusMessage tooltip with the summary. Drift D-013 logged: chat-message injection + answer-merging through record_answer + PII confirm modal deferred from C8 to a Phase D ticket; the file panel surfaces the extracted summary inline but does not yet feed it into the interview turn list. pnpm verify GREEN (119 unit + 36 integration). Phase C: 8/8. Next: PHASE_C_BOUNDARY (full /recheck + human approval before Phase D)."
+    },
+    {
+      "task_id": "C7",
+      "completed_at": "2026-04-26T16:30:00Z",
+      "commit": "fc5b2a4",
+      "notes": "PII guard. New sidecar handler files.guardPii({text, source}) with regex detection for emails, phone numbers (digit-count post-filter 7-12 to dodge false positives), credit cards (Luhn-validated), US SSNs, and IPv4 addresses. Returns {hasPii, hits[], redacted} where hits[].masked is a synthetic-redacted preview and the full redacted text replaces every detection with a placeholder marker. Six integration tests cover clean text, each detector individually, and the multi-detection redaction path. Surfaced to the C8 ingest orchestrator for the document/image/data text outputs (schema text intentionally skipped). pnpm verify GREEN."
+    },
+    {
+      "task_id": "A1",
+      "completed_at": "2026-04-25T18:10:00Z",
+      "commit": "9132e2c",
+      "notes": "Repo scaffold + CI. Next 15.5.15, React 19.2.5, TS 5.9.3, Tailwind 3.4.19, Tauri 2.10.1, Vitest 2.1.9, ESLint 9.39.4. pnpm verify green (typecheck + lint + 2 sanity tests). pnpm dev confirmed Next dev server starts in 1.3s. pnpm tauri dev not exercised in this session (5-10 min cargo first-build deferred to user verification on next workspace open)."
+    },
+    {
+      "task_id": "A2",
+      "completed_at": "2026-04-25T18:30:00Z",
+      "commit": "06df4c4",
+      "notes": "OS keychain wrapper. keyring-rs 3.6.3 in src-tauri (per ADR-0003), exposed via three Tauri IPC commands (keychain_get/set/delete). lib/keychain/index.ts wraps invoke() in ResultAsync<T, KeychainError>. 8 unit tests pass with mocked invoke. cargo check green in 43.81s (first build). Real-keychain integration test deferred to a Phase-D follow-up that adds macOS+Windows CI runners."
+    },
+    {
+      "task_id": "C4",
+      "completed_at": "2026-04-26T12:35:00Z",
+      "commit": "02d0d5e",
+      "notes": "Schema parsing (SQL/JSON-Schema/OpenAPI). Sidecar deps: node-sql-parser 5.4.0 (CJS interop required default-import + destructure), @apidevtools/swagger-parser 12.1.0, js-yaml 4.1.1. Handler files.parseSchema dispatches by extension; SQL via postgres-dialect AST walk for CREATE TABLE statements (column-ref expression objects, NOT NULL detection via def.nullable.type, primary_key implicit NOT NULL); JSON reclassifies to OpenAPI if openapi/swagger field present, else JSON-Schema topLevelType + topLevelProperties; YAML only OpenAPI accepted. 5 integration tests against fixtures/sample.sql + sample-schema.json + sample-openapi.yaml; pnpm verify GREEN (95 unit + 22 integration). Phase C: 4/8."
+    },
+    {
+      "task_id": "C3",
+      "completed_at": "2026-04-26T12:15:00Z",
+      "commit": "85fbb25",
+      "notes": "Image vision (PNG/JPG/WEBP/GIF) per build-order.md C3 + human's 2026-04-26 fallback direction. New sidecar handler files.summariseImage with three tiers: (1) claude CLI via @path attachment syntax; (2) Anthropic Messages API with image content block (if ANTHROPIC_API_KEY env var set); (3) DeepSeek API with OpenAI-compatible image_url block (if DEEPSEEK_API_KEY env var set). Tier 1 preferred because it inherits the user's existing claude auth. Returns {kind, summary, via, sizeBytes} where `via` records which tier produced the answer. Clear error path when all tiers fail listing each tier's failure. 60s timeout per tier. Drift D-010: integration tests deferred (need fixture claude binary + fetch interception infra). Manual verification when C8 wires the upload flow."
+    },
+    {
+      "task_id": "C2",
+      "completed_at": "2026-04-26T12:05:00Z",
+      "commit": "3c7aa4e",
+      "notes": "Text extraction (DOCX/PDF/MD/TXT). Sidecar deps: mammoth 1.12.0 (DOCX), unpdf 1.6.0 (PDF, Mozilla pdf.js underneath, no native deps). New `files` table + migration 0002. New sidecar handler files.extractText({path}) returning {kind, text, summary, pages, sizeBytes}: MD/TXT via direct UTF-8 read, PDF via unpdf, DOCX via lazily-imported mammoth. Summary collapses whitespace and is bounded at 500 chars. 5 integration tests against MD + TXT fixtures (tests/fixtures/sample.md + .txt) including unsupported-extension rejection, missing-path rejection, and summary-bounding. DOCX + PDF integration tests deferred (drift D-009 — binary fixtures need a separate sourcing pass). pnpm verify GREEN (95 unit + 17 integration). Phase C: 2/8."
+    },
+    {
+      "task_id": "C1",
+      "completed_at": "2026-04-26T11:55:00Z",
+      "commit": "86a0ab6",
+      "notes": "File panel UI shell. lib/files/types.ts: IngestedFile + IngestedFileKind union (document/image/schema/data/url/unknown), IngestedFileStatus union (pending/processing/done/error), classifyByName helper. 17 unit tests for the classifier across all extension families and edge cases. New component app/(interview)/components/file-panel.tsx: HTML5 drag-and-drop strip below the chat input; renders a list of ingested files with kind icon, size, status icon (Loader/CheckCircle/XCircle/AlertTriangle for PII), and status message. Wired into the interview page; files held in component state for now (C2-C7 add real extraction + sidecar persistence in a `files` table per spec.md §4). pnpm verify GREEN (95 unit + 12 integration); cargo unchanged."
+    },
+    {
+      "task_id": "B6",
+      "completed_at": "2026-04-26T11:30:00Z",
+      "commit": "fdfc445",
+      "notes": "Ready-to-build gating per kit 14.3.5. lib/interview/readiness.ts: pure checkReadiness(answers, {echoBackConfirmed?, library?}) returning ReadinessResult with fast-path counts, missing ids in library order, echo-back state, and human-readable reason. 8 unit tests cover boundaries (none/partial/all-but-one/all-no-echo/ready/echo-without-answers/sort-order/dupe). Interview UI header now shows 'X / 28 answered' + Start build button: disabled with reason tooltip when not ready; reads 'Confirm echo-back' when all 28 answered, sets the flag on click; once fully ready clicking shows an alert pointing at Phase D for the actual build dashboard."
+    },
+    {
+      "task_id": "B5",
+      "completed_at": "2026-04-26T11:25:00Z",
+      "commit": "fdfc445",
+      "notes": "Recursive interview system prompt. Replaces the minimal A5 prompt in src-tauri/src/chat.rs INTERVIEW_SYSTEM_PROMPT with the kit-style instruction set: one question per turn, follow-ups on vague/contradictory/high-stakes (no depth limit, close on clear answer or 'you choose'), 'you choose' triggers default-application, topic counter at the start of each turn. Promptfoo eval suite deferred (drift D-008) until the kit's authoritative phrasing lands so the eval doesn't lock in placeholder behaviour."
+    },
+    {
+      "task_id": "B4",
+      "completed_at": "2026-04-26T11:15:00Z",
+      "commit": "d61c66f",
+      "notes": "Live spec preview panel in the interview screen. Two-column layout (chat left, spec right; right panel hides under lg breakpoint). New project context wiring: new-project form on success routes to /interview?project=<id>; interview page reads ?project param via Next 15 useSearchParams (wrapped in Suspense per the App Router rules). Loads project via sidecarCall('projects.get'); on load and after each chat 'done' chunk, calls sidecarCall('answers.list') and rebuildSpec() to refresh the preview pane. Chat send now passes project_id + project_path so the MCP record_answer wiring activates. Spec rendered as monospaced <pre>; markdown rendering + diff highlighting deferred (drift D-007). pnpm verify GREEN (70 unit + 12 integration). No new automated tests for the UI change at this stage; live verification deferred to user pnpm tauri dev."
+    },
+    {
+      "task_id": "B3",
+      "completed_at": "2026-04-26T11:00:00Z",
+      "commit": "1b8050c",
+      "notes": "Spec rebuild from answers. lib/interview/rebuild-spec.ts: pure deterministic rebuildSpec(answers, options?) returning markdown; section emitters for §1 Problem, §2 Scope (top flows from Q15), §3 Flows (Q16 ACs), §4 Data model (deferred), §5 Integrations (Q17), §6 NFRs (Q14/21/22/23/24/26/27), §7 Active rules (decision table activation), §8 Interview progress (counts + outstanding). Output is byte-for-byte stable (no timestamps in body). 8 unit tests including 3 snapshot tests on minimal/partial/full fixture answer sets, decision-table activation assertions, progress counts, and unknown-questionId rejection. Drift D-005 extended to subsume the missing kit spec template."
+    },
+    {
+      "task_id": "B2",
+      "completed_at": "2026-04-26T10:50:00Z",
+      "commit": "163677d",
+      "notes": "record_answer MCP tool. New answers table (Drizzle migration 0001_aromatic_warstar.sql) with FK to projects. sidecar/src/handlers/answers.ts (record + list) shared between main sidecar (answers.record/list JSON-RPC methods) and the new MCP server. sidecar/src/mcp-server.ts is a separate Node entry point using @modelcontextprotocol/sdk's StdioServerTransport, exposes record_answer tool with Zod-validated args. Tauri chat_send updated: takes project_id + project_path; when both present, generates .builder/mcp-config.json and passes --mcp-config to claude. INTERVIEW_SYSTEM_PROMPT updated to instruct Claude to call record_answer. Integration test mcp-record-answer.test.ts uses the official MCP client SDK to drive the server stdio, asserts tools/list contains record_answer, calls it, and verifies the row landed via main sidecar's answers.list (2 tests, both green). Drift D-006: skipped the legacy .builder/answers.json file mirror; DB is source of truth. pnpm verify GREEN (62 unit + 12 integration); cargo check + cargo test GREEN."
+    },
+    {
+      "task_id": "B1",
+      "completed_at": "2026-04-26T10:35:00Z",
+      "commit": "a534bd5",
+      "notes": "Question library + decision table seeded into lib/interview/library.ts. 28 fast-path questions with ids and topics taken from .builder/answers.json; prompt strings are inferred placeholders (drift D-005 logged). Decision table starter set covers PII, accessibility, webhooks, jobs, i18n. 9 unit tests cover count, id uniqueness, format, and decision-table integrity. pnpm verify GREEN (61 unit + 10 integration). When the kit is sourced: replace prompt strings + extend table; tests should keep passing without schema changes."
+    },
+    {
+      "task_id": "A5",
+      "completed_at": "2026-04-26T10:15:00Z",
+      "commit": "17c3762",
+      "notes": "Minimum chat per ADR-0002. tokio added as a Tauri dep (process + io-util + rt + macros features). New module src-tauri/src/chat.rs: ChatChunk discriminated enum (session | assistant_delta | done | rate_limit | error), parse_stream_line() pure parser for claude --output-format stream-json events, detect_rate_limit() heuristic on stderr, chat_send Tauri command using tokio Command + Tauri 2 Channel<T> for async streaming. Session resumption via --resume <id> for multi-turn context. lib/chat/client.ts wraps the Channel + invoke pattern returning ResultAsync. app/(interview)/page.tsx implements the chat UI: streaming bubbles (assistant_delta merges into the last assistant message), rate-limit banner, error banner, send-on-Enter (Shift+Enter for newline), aria-live status. 11 Rust tests for the parser/rate-limit detection (cargo test). 5 TS tests for the chat client wrapper (mocked Channel + invoke). pnpm verify GREEN (52 unit + 10 integration). cargo check + cargo test GREEN. E2E + rate-limit integration test deferred to Phase D under D-004 (now extended to cover A5's E2E + integration). Phase A is now 5/5 — phase boundary check follows."
+    },
+    {
+      "task_id": "A4c",
+      "completed_at": "2026-04-26T10:00:00Z",
+      "commit": "ddc875e",
+      "notes": "Project creation flow. Tauri command project_create_folder validates the name (npm-style regex), creates {folder}/{name}/, runs git init, writes placeholder templates (CLAUDE.md, spec.md, .builder/state.json, rules/README.md) bundled via include_str! macros from src-tauri/templates/. Sidecar projects.create handler inserts project + project_created audit row in one Drizzle transaction (atomicity per B11). lib/project/index.ts orchestrates: validate name → Tauri FS work → sidecar projects.create. Returns ResultAsync<Project, ProjectError> with discriminated InvalidName/InvalidFolder/Filesystem/Db errors. 19 new unit tests cover validator + orchestrator. New form at app/(welcome)/new-project/page.tsx uses react-hook-form + zodResolver per F21, accessibility: aria-invalid + aria-describedby per F22-F23. Integration test tests/integration/sidecar-projects.test.ts spawns sidecar against temp DB, exercises create + list + get + UNIQUE constraint + empty-name rejection (5 tests). pnpm verify GREEN (47 unit + 10 integration). cargo check GREEN 1.92s. A4 fully done (A4a + A4b + A4c). Note: partial-failure window between FS and DB steps is documented (no automatic rollback at A4c MVP); future work to wrap both in atomic Tauri command. Real (non-placeholder) template content remains a follow-up per the human's option-3 decision earlier."
+    },
+    {
+      "task_id": "A4b",
+      "completed_at": "2026-04-26T09:50:00Z",
+      "commit": "cbb8128",
+      "notes": "DB schemas + handlers + audit migration. drizzle-orm 0.45.2, drizzle-kit 0.31.10, better-sqlite3 12.9.0 (native compile clean), ulid 3.0.2 added to sidecar. Schemas at sidecar/src/schema/{projects,audit-log}.ts per spec.md §4 + B1/B3. First migration generated: sidecar/migrations/0000_tricky_killmonger.sql. sidecar/src/db.ts handles connection + drizzle migrate runner; pragma WAL + foreign_keys ON. sidecar/src/handlers/audit.ts implements logEvent + listEvents with Zod-validated params. sidecar/src/index.ts parses --db-path and --migrations-folder CLI args, calls initDb on startup, registers audit.* methods. lib/audit/index.ts now calls sidecarCall('audit.logEvent') directly; src-tauri/src/lib.rs's audit_log_event command deleted. Drift D-003 closed. Integration test tests/integration/sidecar-audit.test.ts spawns the sidecar against a temp DB and proves the round-trip (4 tests, all green). pnpm verify GREEN (28 unit + 5 integration). cargo check GREEN 2.28s. A4c (project_create flow) is the last A4 sub-task."
+    },
+    {
+      "task_id": "A4a",
+      "completed_at": "2026-04-26T00:00:00Z",
+      "commit": "bdc90f3",
+      "notes": "Sidecar foundation per ADR-0004 (Node sidecar for SQLite + Drizzle, picked over Rust+rusqlite at A4 entry to honour the original CLAUDE.md stack line). Sidecar package at sidecar/ with a JSON-RPC ping handler. src-tauri/src/sidecar.rs spawns the sidecar in setup, exposes sidecar_rpc Tauri command synchronised by Mutex. lib/sidecar/client.ts wraps it returning ResultAsync<T, SidecarError>. predev/prebuild scripts in package.json build the sidecar before Next dev/build runs. pnpm verify GREEN (27 unit + 1 integration). cargo check GREEN 1.96s. Sidecar protocol smoke-tested via stdin pipe. Tauri end-to-end deferred to user's pnpm tauri dev test on next workspace open. A4b adds DB schemas + handlers + audit migration; A4c adds project_create flow."
+    },
+    {
+      "task_id": "A3",
+      "completed_at": "2026-04-25T19:10:00Z",
+      "commit": "81bbc66",
+      "notes": "Welcome screen + Claude Code detection. Three Tauri commands added (cli_is_installed, cli_is_authenticated, audit_log_event). lib/cli-detection wraps detection in ResultAsync<CliState, DetectionError>. lib/audit logs through tauri-plugin-log. app/(welcome)/page.tsx is the new root route, with three state components (loading, install, auth, ready) plus the original loading state. Hand-written Button/Card/Alert primitives (shadcn CLI not viable, see D-002). app/page.tsx deleted in favour of route group. pnpm verify green (21 unit + 1 integration). cargo check green in 2.26s (incremental). pnpm dev spot-check renders Welcome at /. Welcome E2E (D-004) deferred to Phase D."
+    }
+  ],
+  "open_questions": []
+}

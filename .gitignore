@@ -1,0 +1,75 @@
+# Dependencies
+node_modules/
+
+# Fixture target apps need stub node_modules entries so the hallucinated-
+# import detector resolves their imports. These are tiny package.json
+# placeholders, not real installs — track them.
+!tests/fixtures/target-apps/*/node_modules/
+!tests/fixtures/target-apps/*/node_modules/**
+
+# Next.js build output
+.next/
+out/
+
+# Tauri / Rust build output
+src-tauri/target/
+target/
+
+# Build / dist (root-level only — `app/build/` is the Build dashboard route,
+# which IS tracked).
+/dist/
+/build/
+
+# TypeScript incremental build cache (per tsconfig incremental: true)
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+
+# Test artefacts
+coverage/
+playwright-report/
+test-results/
+.vitest-cache/
+
+# Environment files (real values live in OS keychain or .env.local)
+.env
+.env.local
+.env.*.local
+
+# Builder runtime state at any depth (root .builder/ for the Builder repo
+# itself, src-tauri/.builder/ when Tauri's cwd is src-tauri, and per-novice
+# project .builder/ folders). Only the seed files (state.json, answers.json,
+# mcp-config.json) under the root .builder/ are tracked; runtime artefacts
+# everywhere are ignored.
+**/.builder/builder.db
+**/.builder/builder.db-journal
+**/.builder/builder.db-wal
+**/.builder/builder.db-shm
+**/.builder/snapshots/
+**/.builder/history.log
+**/.builder/builder.log
+**/.builder/builder.log.*
+**/.builder/mcp-config.json
+**/.builder/welcome-screenshot.png
+**/.builder/feedback/
+
+# Claude Code per-user settings (project-level commands and agents ARE tracked)
+.claude/settings.local.json
+
+# Signing artefacts (never committed)
+*.pfx
+*.p12
+*.cert
+*.crt
+*.key
+*.pem
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*~
+
+# pnpm
+.pnpm-store/

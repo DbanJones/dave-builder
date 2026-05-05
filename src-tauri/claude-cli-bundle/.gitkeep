@@ -1,0 +1,2 @@
+# Anchor for the Tauri bundle.resources entry. The actual contents are
+# populated by scripts/package-claude-cli.mjs at prebuild time. See ADR-0009.

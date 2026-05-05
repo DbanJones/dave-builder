@@ -1,0 +1,1527 @@
+mod chat;
+mod deploy;
+mod export;
+mod launch;
+mod orchestrator;
+mod preview_proxy;
+mod research;
+mod sidecar;
+
+use keyring::Entry;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::OnceLock;
+use tauri::Manager;
+
+use chat::{chat_send, chat_stop};
+use deploy::{vercel_deploy, vercel_is_installed};
+use export::{gh_export, gh_is_installed};
+use launch::{target_app_launch, target_app_stop, target_app_write_launch_scripts, LaunchState};
+use orchestrator::{orchestrator_start, orchestrator_stop, OrchestratorState};
+use preview_proxy::PreviewProxyState;
+use research::{research_start, research_stop};
+use sidecar::{sidecar_rpc, sidecar_rpc_stream, spawn_sidecar, SidecarState};
+
+// Bundled placeholder templates copied into every newly created project per
+// build-order.md A4c (placeholder content per human direction 2026-04-25).
+// `include_str!` paths are relative to this source file.
+const TEMPLATE_CLAUDE_MD: &str = include_str!("../templates/CLAUDE.md");
+const TEMPLATE_SPEC_MD: &str = include_str!("../templates/spec.md");
+const TEMPLATE_BUILDER_STATE: &str = include_str!("../templates/builder-state.json");
+const TEMPLATE_RULES_README: &str = include_str!("../templates/rules-README.md");
+const TEMPLATE_DAVID_EASTER_EGG: &str = include_str!("../templates/david-easter-egg.md");
+
+// Builder-local keychain commands. See ADR-0003.
+//
+// `service` is the namespaced service identifier (e.g. "com.airtec.builder.vercel").
+// `account` is the per-credential discriminator (e.g. "default").
+// Errors are returned to the webview as plain strings; the TypeScript wrapper
+// at `lib/keychain/index.ts` re-wraps them into a discriminated `KeychainError`.
+
+#[tauri::command]
+fn keychain_get(service: String, account: String) -> Result<Option<String>, String> {
+  let entry = Entry::new(&service, &account).map_err(|e| e.to_string())?;
+  match entry.get_password() {
+    Ok(secret) => Ok(Some(secret)),
+    Err(keyring::Error::NoEntry) => Ok(None),
+    Err(e) => Err(e.to_string()),
+  }
+}
+
+#[tauri::command]
+fn keychain_set(service: String, account: String, secret: String) -> Result<(), String> {
+  let entry = Entry::new(&service, &account).map_err(|e| e.to_string())?;
+  entry.set_password(&secret).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn keychain_delete(service: String, account: String) -> Result<(), String> {
+  let entry = Entry::new(&service, &account).map_err(|e| e.to_string())?;
+  match entry.delete_credential() {
+    Ok(()) => Ok(()),
+    Err(keyring::Error::NoEntry) => Ok(()),
+    Err(e) => Err(e.to_string()),
+  }
+}
+
+// Claude Code CLI detection per ADR-0002 and build-order.md A3.
+//
+// Robustness note: a packaged macOS .app launched via Finder / Dock
+// inherits a minimal PATH, NOT the user's shell PATH. Plain `which
+// claude` therefore misses Homebrew (`/opt/homebrew/bin`,
+// `/usr/local/bin`), npm-global (`~/.npm-global/bin`), Bun, Volta, and
+// NVM installs even when claude is correctly installed. Detection
+// runs three passes in order and returns the first absolute path that
+// also responds to `--version`:
+//   1. `which` / `where` on the inherited PATH (cheap, dev-build win).
+//   2. The user's login shell (`zsh -lc 'command -v claude'` on Unix,
+//      `cmd /c where claude` on Windows) so .zshrc / .bashrc exports
+//      get sourced. This is what unblocks the GUI-launched .app case.
+//   3. Direct probes of well-known install locations.
+//
+// `cli_is_authenticated` runs `claude -p "ping" --output-format json`
+// using the resolved path so the same PATH-gap doesn't bite at probe
+// time. Cost is small (single ping prompt) but real.
+
+fn home_dir() -> Option<PathBuf> {
+  std::env::var_os("HOME")
+    .or_else(|| std::env::var_os("USERPROFILE"))
+    .map(PathBuf::from)
+}
+
+/// Path to the CLI that ships inside the Builder installer (ADR-0009).
+/// Set once during `setup()` from `app.path().resource_dir()`. Free
+/// functions read it without needing an AppHandle, which keeps the
+/// existing resolver shape unchanged.
+static BUNDLED_CLAUDE_CLI_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+/// Bundled-CLI candidates produced by `scripts/package-claude-cli.mjs`.
+/// The vendoring script installs `@anthropic-ai/claude-code` into a flat
+/// `node_modules/` and exposes the npm-generated wrapper under
+/// `.bin/`. Returns an empty Vec when no bundle is present (dev tree,
+/// or `--no-bundle` builds).
+fn bundled_claude_paths() -> Vec<PathBuf> {
+  let Some(Some(root)) = BUNDLED_CLAUDE_CLI_DIR.get().map(|x| x.as_ref()) else {
+    return Vec::new();
+  };
+  let bin_dir = root.join("node_modules").join(".bin");
+  let mut out: Vec<PathBuf> = Vec::new();
+  if cfg!(target_os = "windows") {
+    out.push(bin_dir.join("claude.cmd"));
+    out.push(bin_dir.join("claude.exe"));
+  } else {
+    out.push(bin_dir.join("claude"));
+  }
+  out.into_iter().filter(|p| p.exists()).collect()
+}
+
+/// Candidate install locations probed when neither PATH nor the login
+/// shell yields a hit. Order matters — earlier entries win.
+fn well_known_claude_paths() -> Vec<PathBuf> {
+  let mut out: Vec<PathBuf> = Vec::new();
+  if cfg!(target_os = "windows") {
+    if let Some(home) = home_dir() {
+      out.push(home.join(r"AppData\Roaming\npm\claude.cmd"));
+      out.push(home.join(r"AppData\Roaming\npm\claude.exe"));
+      out.push(home.join(r"AppData\Local\Programs\claude\claude.exe"));
+      out.push(home.join(r"scoop\shims\claude.cmd"));
+      out.push(home.join(r".bun\bin\claude.exe"));
+    }
+    out.push(PathBuf::from(r"C:\Program Files\nodejs\claude.cmd"));
+  } else {
+    // Homebrew (Apple Silicon, Intel, Linuxbrew) + manual /usr/local installs.
+    out.push(PathBuf::from("/opt/homebrew/bin/claude"));
+    out.push(PathBuf::from("/usr/local/bin/claude"));
+    out.push(PathBuf::from("/home/linuxbrew/.linuxbrew/bin/claude"));
+    if let Some(home) = home_dir() {
+      // npm global (PREFIX-based) — common on macOS without Homebrew.
+      out.push(home.join(".npm-global/bin/claude"));
+      out.push(home.join(".npm/bin/claude"));
+      // Bun, Volta, asdf shims, fnm, mise.
+      out.push(home.join(".bun/bin/claude"));
+      out.push(home.join(".volta/bin/claude"));
+      out.push(home.join(".asdf/shims/claude"));
+      out.push(home.join(".local/bin/claude"));
+      out.push(home.join(".local/share/fnm/aliases/default/bin/claude"));
+      out.push(home.join(".local/share/mise/shims/claude"));
+    }
+  }
+  out
+}
+
+/// Run the user's login shell to evaluate `command -v claude` (or
+/// `where claude` on Windows). Catches Homebrew + custom PATH exports
+/// from .zshrc / .bashrc that a Finder-launched app doesn't see.
+fn login_shell_resolve() -> Option<PathBuf> {
+  let (program, args): (&str, &[&str]) = if cfg!(target_os = "windows") {
+    ("cmd", &["/c", "where claude"])
+  } else if cfg!(target_os = "macos") {
+    // -i interactive so PATH from .zshrc gets sourced (login shells on
+    // macOS source .zprofile but not always .zshrc; -i covers both).
+    ("/bin/zsh", &["-ilc", "command -v claude"])
+  } else {
+    ("/bin/bash", &["-ilc", "command -v claude"])
+  };
+  let output = Command::new(program).args(args).output().ok()?;
+  if !output.status.success() {
+    return None;
+  }
+  let s = String::from_utf8_lossy(&output.stdout);
+  let first = s.lines().next()?.trim();
+  if first.is_empty() {
+    return None;
+  }
+  let p = PathBuf::from(first);
+  if p.exists() {
+    Some(p)
+  } else {
+    None
+  }
+}
+
+/// First pass: rely on the inherited PATH. Cheap and works in dev.
+fn path_resolve() -> Option<PathBuf> {
+  let which_or_where = if cfg!(target_os = "windows") {
+    "where"
+  } else {
+    "which"
+  };
+  let output = Command::new(which_or_where)
+    .arg("claude")
+    .output()
+    .ok()?;
+  if !output.status.success() {
+    return None;
+  }
+  let s = String::from_utf8_lossy(&output.stdout);
+  let first = s.lines().next()?.trim();
+  if first.is_empty() {
+    return None;
+  }
+  let p = PathBuf::from(first);
+  if p.exists() {
+    Some(p)
+  } else {
+    None
+  }
+}
+
+/// Resolve an absolute path to the `claude` binary using the three-tier
+/// strategy. Returns None if no candidate exists or none responds to
+/// `--version`. The returned path is suitable for direct `Command::new`
+/// invocations elsewhere in the app.
+fn resolve_claude_binary() -> Option<PathBuf> {
+  // System installs win over the bundled fallback (ADR-0009): if the
+  // novice already has a working CLI, respect their version + auth.
+  let candidates: Vec<PathBuf> = std::iter::empty()
+    .chain(path_resolve())
+    .chain(login_shell_resolve())
+    .chain(well_known_claude_paths().into_iter().filter(|p| p.exists()))
+    .chain(bundled_claude_paths())
+    .collect();
+  for cand in candidates {
+    let probe = Command::new(&cand).arg("--version").output();
+    if let Ok(out) = probe {
+      if out.status.success() {
+        return Some(cand);
+      }
+    }
+  }
+  None
+}
+
+#[tauri::command]
+fn cli_is_installed() -> Result<bool, String> {
+  Ok(resolve_claude_binary().is_some())
+}
+
+/// Diagnostic command: returns the absolute path the resolver settled
+/// on, plus the candidate list it tried. Surfaced to the welcome
+/// screen's "missing" state so the novice can see exactly where we
+/// looked instead of being told a flat "not found".
+#[tauri::command]
+fn cli_resolution_diagnostics() -> Result<serde_json::Value, String> {
+  let resolved = resolve_claude_binary();
+  let probed: Vec<String> = std::iter::empty()
+    .chain(path_resolve())
+    .chain(login_shell_resolve())
+    .chain(well_known_claude_paths())
+    .chain(bundled_claude_paths())
+    .map(|p| p.to_string_lossy().into_owned())
+    .collect();
+  let bundled_present = !bundled_claude_paths().is_empty();
+  Ok(serde_json::json!({
+    "resolved": resolved.map(|p| p.to_string_lossy().into_owned()),
+    "probed": probed,
+    "bundledPresent": bundled_present,
+  }))
+}
+
+#[tauri::command]
+fn cli_is_authenticated() -> Result<bool, String> {
+  let path = match resolve_claude_binary() {
+    Some(p) => p,
+    None => return Ok(false),
+  };
+  let output = Command::new(&path)
+    .arg("-p")
+    .arg("ping")
+    .arg("--output-format")
+    .arg("json")
+    .output()
+    .map_err(|e| format!("failed to spawn claude at {}: {e}", path.display()))?;
+  Ok(output.status.success())
+}
+
+/// Rich classification of why a `claude -p ping` probe failed. Surfaced
+/// to the welcome screen so the novice gets "you're rate-limited; try
+/// in 3 minutes" instead of a binary "not authenticated". Discriminant
+/// values are intentionally narrow so the TS side can pattern-match.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthDiagnostics {
+  ok: bool,
+  /// "ok" | "missing" | "unauthenticated" | "rate_limit" | "network" | "unknown"
+  kind: String,
+  message: String,
+  /// Last ~800 chars of the probe's stderr/stdout, for the Advanced toggle.
+  stderr_tail: Option<String>,
+  resolved_path: Option<String>,
+}
+
+fn tail_chars(s: &str, n: usize) -> String {
+  let count = s.chars().count();
+  if count <= n {
+    return s.to_string();
+  }
+  s.chars().skip(count - n).collect()
+}
+
+#[tauri::command]
+fn cli_auth_diagnostics() -> Result<AuthDiagnostics, String> {
+  let path = match resolve_claude_binary() {
+    Some(p) => p,
+    None => {
+      return Ok(AuthDiagnostics {
+        ok: false,
+        kind: "missing".to_string(),
+        message: "Claude Code CLI was not found on this machine.".to_string(),
+        stderr_tail: None,
+        resolved_path: None,
+      })
+    }
+  };
+  let resolved_path = Some(path.to_string_lossy().into_owned());
+  let output = match Command::new(&path)
+    .arg("-p")
+    .arg("ping")
+    .arg("--output-format")
+    .arg("json")
+    .output()
+  {
+    Ok(o) => o,
+    Err(e) => {
+      return Ok(AuthDiagnostics {
+        ok: false,
+        kind: "unknown".to_string(),
+        message: format!("Could not run claude: {e}"),
+        stderr_tail: None,
+        resolved_path,
+      })
+    }
+  };
+  if output.status.success() {
+    return Ok(AuthDiagnostics {
+      ok: true,
+      kind: "ok".to_string(),
+      message: "Claude Code is signed in and reachable.".to_string(),
+      stderr_tail: None,
+      resolved_path,
+    });
+  }
+  let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+  let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+  let combined = format!("{stderr}\n{stdout}");
+  let lower = combined.to_lowercase();
+  let (kind, message) = if lower.contains("rate limit")
+    || lower.contains("too many requests")
+    || lower.contains("429")
+  {
+    (
+      "rate_limit",
+      "Your Claude account has hit a rate limit. Wait a few minutes and re-check.".to_string(),
+    )
+  } else if lower.contains("not logged in")
+    || lower.contains("not authenticated")
+    || lower.contains("session expired")
+    || lower.contains("unauthorized")
+    || lower.contains("invalid api key")
+    || lower.contains("401")
+    || lower.contains("/login")
+  {
+    (
+      "unauthenticated",
+      "Claude Code is installed but not signed in. Open a terminal, run `claude`, and sign in.".to_string(),
+    )
+  } else if lower.contains("enotfound")
+    || lower.contains("econnrefused")
+    || lower.contains("etimedout")
+    || lower.contains("dns")
+    || lower.contains("offline")
+    || lower.contains("network")
+    || lower.contains("proxy")
+  {
+    (
+      "network",
+      "Claude Code can't reach Anthropic. Check your internet connection, VPN, or proxy.".to_string(),
+    )
+  } else {
+    (
+      "unknown",
+      "Claude Code returned an unexpected error. Open Advanced for details.".to_string(),
+    )
+  };
+  let tail = tail_chars(combined.trim(), 800);
+  Ok(AuthDiagnostics {
+    ok: false,
+    kind: kind.to_string(),
+    message,
+    stderr_tail: if tail.is_empty() { None } else { Some(tail) },
+    resolved_path,
+  })
+}
+
+/// Returns whether `node` and `npm` are reachable from the Builder's
+/// inherited PATH. `npm install -g @anthropic-ai/claude-code` (the
+/// novice install path printed on the welcome screen) requires both;
+/// detecting their absence up front lets us guide the novice to install
+/// Node first instead of silently failing later.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NodeNpmDiagnostics {
+  node_version: Option<String>,
+  npm_version: Option<String>,
+}
+
+fn run_version(program: &str) -> Option<String> {
+  // Windows resolves `npm` to `npm.cmd`, which `Command::new` won't pick
+  // up without going through the shell. Use cmd /c there.
+  let output = if cfg!(target_os = "windows") {
+    Command::new("cmd")
+      .args(["/c", program, "--version"])
+      .output()
+      .ok()?
+  } else {
+    Command::new(program).arg("--version").output().ok()?
+  };
+  if !output.status.success() {
+    return None;
+  }
+  let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+  if s.is_empty() {
+    None
+  } else {
+    Some(s)
+  }
+}
+
+#[tauri::command]
+fn node_npm_diagnostics() -> Result<NodeNpmDiagnostics, String> {
+  Ok(NodeNpmDiagnostics {
+    node_version: run_version("node"),
+    npm_version: run_version("npm"),
+  })
+}
+
+// Audit logging is now routed through the sidecar's `audit.logEvent` handler
+// (see ADR-0004 + drift D-003 closed at A4b). The previous `audit_log_event`
+// Tauri command has been removed; lib/audit/index.ts calls sidecarCall directly.
+
+// Write the Builder-rebuilt spec into the novice's project folder so the
+// spawned claude has real context to work from. Without this, claude reads
+// the placeholder spec.md from project creation and goes off on tangents
+// (live-tested 2026-04-26: claude started giving VS Code setup advice
+// because it had no actual spec to anchor on).
+//
+// Path-sandboxed to {project}/spec.md (binding rule 5).
+#[tauri::command]
+fn write_target_spec(project_path: String, spec_text: String) -> Result<String, String> {
+  let project_root = expand_tilde(&project_path);
+  if !project_root.exists() {
+    return Err(format!(
+      "write_target_spec: project folder not found: {}",
+      project_root.display()
+    ));
+  }
+  let spec_path = project_root.join("spec.md");
+  fs::write(&spec_path, spec_text).map_err(|e| format!("write_target_spec: {e}"))?;
+  spec_path
+    .canonicalize()
+    .map(|p| p.display().to_string())
+    .map_err(|e| format!("canonicalise: {e}"))
+}
+
+// Back up the current `spec.md` to `.builder/spec.pre-research.md` before
+// the deep-research step (Flow M AC5) overwrites it. Idempotent: if the
+// backup already exists we leave it alone, so a second research run can't
+// clobber the very first original. Path-sandboxed to the project root.
+#[tauri::command]
+fn backup_target_spec(project_path: String) -> Result<String, String> {
+  let project_root = expand_tilde(&project_path);
+  if !project_root.exists() {
+    return Err(format!(
+      "backup_target_spec: project folder not found: {}",
+      project_root.display()
+    ));
+  }
+  let canon_root = project_root
+    .canonicalize()
+    .map_err(|e| format!("backup_target_spec: canonicalise project root: {e}"))?;
+
+  let spec_path = canon_root.join("spec.md");
+  if !spec_path.exists() {
+    return Err(format!(
+      "backup_target_spec: spec.md not found at {}",
+      spec_path.display()
+    ));
+  }
+  let builder_dir = canon_root.join(".builder");
+  fs::create_dir_all(&builder_dir)
+    .map_err(|e| format!("backup_target_spec: create .builder/: {e}"))?;
+
+  let backup_path = builder_dir.join("spec.pre-research.md");
+  if backup_path.exists() {
+    // Idempotent: do not overwrite an existing backup. The whole point is
+    // to preserve the *first* original across multiple research runs.
+    return Ok(backup_path.display().to_string());
+  }
+  fs::copy(&spec_path, &backup_path)
+    .map_err(|e| format!("backup_target_spec: copy: {e}"))?;
+  Ok(backup_path.display().to_string())
+}
+
+// Build dashboard readers (D3). Both commands read files from inside the
+// novice's project folder (binding rule 5: untrusted from the Builder's
+// perspective). They sanitise the requested path by joining `project_path` +
+// fixed sub-path; we never accept an arbitrary path from the webview.
+//
+// `read_target_state` returns `{project}/.builder/state.json` as raw text;
+// the webview wrapper validates with Zod. Returns Ok(None) when the file
+// doesn't exist (a freshly-created project has no orchestrator state yet),
+// matching the dashboard's "(no phase yet)" placeholder.
+//
+// `read_history_log_tail` returns the last N JSON lines from
+// `{project}/.builder/history.log`. Used to populate the live tail when
+// opening a paused project; new orchestrator events are appended live by D2.
+
+const HISTORY_LOG_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
+#[tauri::command]
+fn read_target_state(project_path: String) -> Result<Option<String>, String> {
+  let project_root = expand_tilde(&project_path);
+  if !project_root.exists() {
+    return Err(format!(
+      "read_target_state: project folder not found: {}",
+      project_root.display()
+    ));
+  }
+  let state_path = project_root.join(".builder").join("state.json");
+  if !state_path.exists() {
+    return Ok(None);
+  }
+  fs::read_to_string(&state_path)
+    .map(Some)
+    .map_err(|e| format!("read_target_state: {e}"))
+}
+
+// `read_review_md` returns `{project}/.builder/review.md` as raw text. The
+// build-phase agent writes this file at the end of every build (see the
+// kickoff prompt's REVIEW step) so the dashboard can render a coverage
+// checklist against spec.md. Returns Ok(None) when the file doesn't exist
+// yet (build hasn't reached the review step) — the dashboard renders a
+// "review will appear here" placeholder for that case.
+const REVIEW_MD_MAX_BYTES: u64 = 1 * 1024 * 1024;
+
+// Read the project's spec.md back. Used by performBuild() to detect a
+// research-adopted spec (line containing the v2 marker `(via deep
+// research)`) so the deterministic interview-rebuild doesn't clobber
+// the novice's adopted research changes. Path-sandboxed to
+// `{project}/spec.md`. Returns Ok(None) when the file doesn't exist.
+const SPEC_MD_MAX_BYTES: u64 = 1 * 1024 * 1024; // 1 MB hard cap; specs are tiny
+
+#[tauri::command]
+fn read_target_spec(project_path: String) -> Result<Option<String>, String> {
+  let project_root = expand_tilde(&project_path);
+  if !project_root.exists() {
+    return Err(format!(
+      "read_target_spec: project folder not found: {}",
+      project_root.display()
+    ));
+  }
+  let spec_path = project_root.join("spec.md");
+  if !spec_path.exists() {
+    return Ok(None);
+  }
+  let metadata = fs::metadata(&spec_path).map_err(|e| format!("stat spec.md: {e}"))?;
+  if metadata.len() > SPEC_MD_MAX_BYTES {
+    return Err(format!(
+      "read_target_spec: spec.md exceeds {} byte cap (got {})",
+      SPEC_MD_MAX_BYTES,
+      metadata.len()
+    ));
+  }
+  fs::read_to_string(&spec_path)
+    .map(Some)
+    .map_err(|e| format!("read_target_spec: {e}"))
+}
+
+#[tauri::command]
+fn read_review_md(project_path: String) -> Result<Option<String>, String> {
+  let project_root = expand_tilde(&project_path);
+  if !project_root.exists() {
+    return Err(format!(
+      "read_review_md: project folder not found: {}",
+      project_root.display()
+    ));
+  }
+  let review_path = project_root.join(".builder").join("review.md");
+  if !review_path.exists() {
+    return Ok(None);
+  }
+  let metadata = fs::metadata(&review_path).map_err(|e| format!("stat review.md: {e}"))?;
+  if metadata.len() > REVIEW_MD_MAX_BYTES {
+    return Err(format!(
+      "read_review_md: review.md exceeds {} byte cap (got {})",
+      REVIEW_MD_MAX_BYTES,
+      metadata.len()
+    ));
+  }
+  fs::read_to_string(&review_path)
+    .map(Some)
+    .map_err(|e| format!("read_review_md: {e}"))
+}
+
+#[tauri::command]
+fn read_history_log_tail(project_path: String, limit: usize) -> Result<Vec<String>, String> {
+  let project_root = expand_tilde(&project_path);
+  if !project_root.exists() {
+    return Err(format!(
+      "read_history_log_tail: project folder not found: {}",
+      project_root.display()
+    ));
+  }
+  let log_path = project_root.join(".builder").join("history.log");
+  if !log_path.exists() {
+    return Ok(vec![]);
+  }
+  let metadata = fs::metadata(&log_path).map_err(|e| format!("stat history.log: {e}"))?;
+  if metadata.len() > HISTORY_LOG_MAX_BYTES {
+    return Err(format!(
+      "read_history_log_tail: history.log exceeds {} byte cap (got {})",
+      HISTORY_LOG_MAX_BYTES,
+      metadata.len()
+    ));
+  }
+  let text = fs::read_to_string(&log_path).map_err(|e| format!("read history.log: {e}"))?;
+  let mut lines: Vec<String> = text
+    .lines()
+    .filter(|l| !l.trim().is_empty())
+    .map(|l| l.to_string())
+    .collect();
+  if lines.len() > limit {
+    let drop = lines.len() - limit;
+    lines.drain(..drop);
+  }
+  Ok(lines)
+}
+
+// Pre-flight capability check for Start build. The user reported repeated
+// directory write failures; rather than make the orchestrator's first 30
+// seconds fail and waste a Claude turn, probe the project folder + .builder/
+// + claude CLI BEFORE spawn and surface a single clear blocking alert in
+// the dashboard listing exactly what's missing or unwritable.
+//
+// Returns Ok({ok: true, ...}) when everything's good, Ok({ok: false, errors})
+// when there are blockers. Never throws — the dashboard renders the result.
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CapabilityReport {
+  ok: bool,
+  errors: Vec<String>,
+  checked_path: String,
+}
+
+#[tauri::command]
+fn build_capability_check(project_path: String) -> Result<CapabilityReport, String> {
+  let mut errors: Vec<String> = vec![];
+  let cwd = expand_tilde(&project_path);
+  let checked_path = cwd.display().to_string();
+
+  // 0. Reject project paths INSIDE the Builder source tree. Live test
+  //    showed that placing a project at e.g. ~/...Tool Builder/ or
+  //    inside src-tauri/ caused claude to read the Builder repo's own
+  //    .claude/settings.json (or src-tauri/.claude/) and lock the
+  //    session to the Builder source folder. Strict rejection up front
+  //    is cheaper than debugging the symptom.
+  if let Ok(canon_cwd) = cwd.canonicalize() {
+    if let Ok(builder_root) = sidecar::project_root_from_cwd() {
+      if canon_cwd.starts_with(&builder_root) {
+        errors.push(format!(
+          "Project folder is inside the Builder app's own source folder ({}). \
+           Choose a folder outside this repo — the recommended default is ~/Documents/ClaudeBuilds.",
+          builder_root.display()
+        ));
+      }
+    }
+  }
+
+  // 1. Project folder exists + is a directory.
+  if !cwd.exists() {
+    errors.push(format!("Project folder doesn't exist: {checked_path}"));
+  } else if !cwd.is_dir() {
+    errors.push(format!("Project path is a file, not a directory: {checked_path}"));
+  } else {
+    // 2. Project folder writable — write + delete a tiny probe file.
+    let probe_path = cwd.join(".builder-capability-probe.tmp");
+    match fs::write(&probe_path, b"probe") {
+      Ok(()) => {
+        let _ = fs::remove_file(&probe_path);
+      }
+      Err(e) => {
+        errors.push(format!(
+          "Project folder isn't writable ({checked_path}): {e}. Check folder permissions or move the project somewhere outside iCloud / OneDrive."
+        ));
+      }
+    }
+  }
+
+  // 3. .builder/ subdirectory exists OR can be created.
+  let builder_dir = cwd.join(".builder");
+  if !builder_dir.exists() {
+    if let Err(e) = fs::create_dir_all(&builder_dir) {
+      errors.push(format!(
+        ".builder/ subdirectory cannot be created at {}: {e}",
+        builder_dir.display()
+      ));
+    }
+  }
+
+  // 4. claude CLI resolvable + runnable. Uses the same three-tier
+  // resolver as cli_is_installed so a Finder-launched .app with a
+  // minimal inherited PATH still finds Homebrew / npm-global / Bun /
+  // NVM installs via the user's login shell.
+  match resolve_claude_binary() {
+    Some(_) => {}
+    None => errors.push(
+      "Claude Code CLI (`claude`) not found. Install it from https://docs.claude.com/en/docs/claude-code/setup, or open the Builder once from a terminal where `claude --version` works."
+        .to_string(),
+    ),
+  }
+
+  Ok(CapabilityReport {
+    ok: errors.is_empty(),
+    errors,
+    checked_path,
+  })
+}
+
+// Drift-log writer (D5). Appends a markdown block to the novice's
+// {project}/docs/drift-log.md, creating the file (with the same header the
+// Builder's own drift-log uses) if it doesn't yet exist. Path-sandboxed:
+// the webview supplies project_path; we always write to {project}/docs/.
+
+const DRIFT_LOG_HEADER: &str = "# Drift log\n\nPer rules/07-self-check.md SC26: every correction or accepted drift is logged here with date, AC id or scope item, drift type, resolution, and commit hash. This is the audit trail.\n\n";
+
+#[tauri::command]
+fn append_drift_log_line(
+  project_path: String,
+  drift_id: String,
+  kind: String,
+  description: String,
+  resolution: String,
+  commit_hash: Option<String>,
+) -> Result<String, String> {
+  let project_root = expand_tilde(&project_path);
+  if !project_root.exists() {
+    return Err(format!(
+      "append_drift_log_line: project folder not found: {}",
+      project_root.display()
+    ));
+  }
+  let docs_dir = project_root.join("docs");
+  fs::create_dir_all(&docs_dir).map_err(|e| format!("create docs/: {e}"))?;
+  let log_path = docs_dir.join("drift-log.md");
+
+  // Seed the file with the same header the Builder's own drift-log uses
+  // when it doesn't yet exist.
+  if !log_path.exists() {
+    fs::write(&log_path, DRIFT_LOG_HEADER).map_err(|e| format!("seed drift-log: {e}"))?;
+  }
+
+  let now = chrono_now_iso8601();
+  let commit_line = commit_hash
+    .as_deref()
+    .filter(|c| !c.trim().is_empty())
+    .map(|c| format!("- **Commit**: {c}\n"))
+    .unwrap_or_default();
+  let block = format!(
+    "\n### {drift_id} — {description}\n- **Drift type**: {kind}.\n- **Resolved**: {now}.\n- **Resolution**: {resolution}.\n{commit_line}"
+  );
+
+  let mut existing = fs::read_to_string(&log_path).map_err(|e| format!("read drift-log: {e}"))?;
+  existing.push_str(&block);
+  fs::write(&log_path, existing).map_err(|e| format!("write drift-log: {e}"))?;
+
+  log_path
+    .canonicalize()
+    .map(|p| p.display().to_string())
+    .map_err(|e| format!("canonicalise: {e}"))
+}
+
+// Lightweight ISO 8601 timestamp without a chrono dep — std::time only.
+fn chrono_now_iso8601() -> String {
+  use std::time::{SystemTime, UNIX_EPOCH};
+  let secs = SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .map(|d| d.as_secs())
+    .unwrap_or(0);
+  // Use a fixed-format date; second-precision is fine for an audit line.
+  // We avoid pulling chrono just for this.
+  format!("{}Z", iso8601_from_unix_secs(secs))
+}
+
+fn iso8601_from_unix_secs(secs: u64) -> String {
+  // Days since 1970-01-01 (Unix epoch)
+  let days = (secs / 86400) as i64;
+  let rem = secs % 86400;
+  let hour = rem / 3600;
+  let min = (rem % 3600) / 60;
+  let sec = rem % 60;
+  let (year, month, day) = civil_from_days(days);
+  format!(
+    "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+    year, month, day, hour, min, sec
+  )
+}
+
+// Howard Hinnant's date algorithm (public domain) — converts days since
+// 1970-01-01 (Gregorian) to (year, month, day).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+  let z = z + 719468;
+  let era = if z >= 0 { z / 146097 } else { (z - 146096) / 146097 };
+  let doe = (z - era * 146097) as u64;
+  let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  let y = yoe as i64 + era * 400;
+  let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  let mp = (5 * doy + 2) / 153;
+  let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+  let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+  let y = if m <= 2 { y + 1 } else { y };
+  (y, m, d)
+}
+
+// File ingestion save (C8). Decodes a base64-encoded blob from the webview
+// and writes it to {project_path}/inputs/{name}, returning the absolute
+// path. Per spec.md §6 size limits (B28): 25 MB documents, 10 MB images,
+// 5 MB schemas, 100 MB data samples. Enforced as a single 25 MB cap here
+// and refined per-kind in a later pass when the UI knows the kind.
+
+const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
+
+#[tauri::command]
+fn file_save_uploaded(
+  project_path: String,
+  name: String,
+  content_base64: String,
+) -> Result<String, String> {
+  use base64::Engine;
+
+  // Validate name: no path separators, no leading dot, no parent traversal.
+  if name.contains('/') || name.contains('\\') || name.starts_with('.') || name == ".." {
+    return Err(format!("file_save_uploaded: invalid file name '{name}'"));
+  }
+  if name.is_empty() || name.len() > 255 {
+    return Err("file_save_uploaded: file name must be 1-255 characters".to_string());
+  }
+
+  let bytes = base64::engine::general_purpose::STANDARD
+    .decode(content_base64.as_bytes())
+    .map_err(|e| format!("file_save_uploaded: base64 decode failed: {e}"))?;
+  if bytes.len() > MAX_UPLOAD_BYTES {
+    return Err(format!(
+      "file_save_uploaded: file too large ({} bytes, max {})",
+      bytes.len(),
+      MAX_UPLOAD_BYTES
+    ));
+  }
+
+  let project_root = expand_tilde(&project_path);
+  if !project_root.exists() {
+    return Err(format!(
+      "file_save_uploaded: project folder not found: {}",
+      project_root.display()
+    ));
+  }
+
+  let inputs_dir = project_root.join("inputs");
+  fs::create_dir_all(&inputs_dir)
+    .map_err(|e| format!("file_save_uploaded: create inputs/: {e}"))?;
+
+  let target = inputs_dir.join(&name);
+  // Refuse to overwrite (caller can choose to send a renamed copy if they want).
+  if target.exists() {
+    return Err(format!(
+      "file_save_uploaded: '{}' already exists; rename the file or remove the existing copy first",
+      target.display()
+    ));
+  }
+
+  fs::write(&target, &bytes).map_err(|e| format!("file_save_uploaded: write: {e}"))?;
+
+  target
+    .canonicalize()
+    .map(|p| p.display().to_string())
+    .map_err(|e| format!("file_save_uploaded: canonicalise: {e}"))
+}
+
+// Region screen capture for the Preview tab's "Capture & annotate" button
+// (D-028). Spawns macOS's native `screencapture -i <file>` which puts a
+// crosshair region picker on top of every window — the novice drags a
+// rectangle over the iframe (or anywhere on screen), screencapture writes
+// the PNG to a temp file, we read the bytes and return them base64-encoded
+// so the webview can construct a Blob and seed the AnnotationModal.
+//
+// macOS-only for slice 2.5. Linux/Windows fall back to the empty modal +
+// drag-drop / paste flow until we add a cross-platform path (likely the
+// `xcap` Rust crate, deferred to a later slice).
+
+#[tauri::command]
+fn capture_region_to_png() -> Result<String, String> {
+  use base64::Engine;
+  use std::process::Command;
+  use std::time::{SystemTime, UNIX_EPOCH};
+
+  if !cfg!(target_os = "macos") {
+    return Err(
+      "Region capture is currently macOS-only. Drop or paste a screenshot in the annotate window instead."
+        .to_string(),
+    );
+  }
+
+  let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+  let temp_path = std::env::temp_dir()
+    .join(format!("builder-capture-{}-{:09}.png", now.as_secs(), now.subsec_nanos()));
+
+  // -i: interactive region picker (drag to select; ESC cancels)
+  // -t png: explicit PNG (default, but be defensive)
+  let status = Command::new("screencapture")
+    .arg("-i")
+    .arg("-t")
+    .arg("png")
+    .arg(&temp_path)
+    .status()
+    .map_err(|e| format!("failed to spawn screencapture: {e}"))?;
+
+  if !status.success() || !temp_path.exists() {
+    // User pressed ESC, or the picker was dismissed without a region.
+    // No file means no capture; clean up if a stub was created.
+    let _ = fs::remove_file(&temp_path);
+    return Err("Capture cancelled.".to_string());
+  }
+
+  let bytes = fs::read(&temp_path).map_err(|e| format!("read capture: {e}"))?;
+  let _ = fs::remove_file(&temp_path);
+
+  if bytes.is_empty() {
+    return Err("Capture produced an empty file.".to_string());
+  }
+
+  Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
+}
+
+// Visual-feedback PNG writer (Slice 1 of the annotation tool — D-026).
+// The novice pauses a build, annotates a screenshot of the built app inside
+// the Builder, and clicks Send. This command writes the flattened PNG
+// (image + annotation overlay, base64-encoded by the webview) into
+// {project}/.builder/feedback/ and returns the relative path the chat prompt
+// references so Claude's Read tool can pick it up. Path-sandboxed: the
+// webview supplies project_path; we always write to {project}/.builder/feedback/.
+//
+// Cap: 10 MB per AC6 of the D-026 spec — annotated screenshots over that
+// are vanishingly unlikely from a UI canvas; refusing them protects against
+// accidental huge uploads from a paste of the wrong thing.
+
+const MAX_FEEDBACK_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+
+#[tauri::command]
+fn feedback_image_save(
+  project_path: String,
+  content_base64: String,
+) -> Result<String, String> {
+  use base64::Engine;
+  use std::time::{SystemTime, UNIX_EPOCH};
+
+  let bytes = base64::engine::general_purpose::STANDARD
+    .decode(content_base64.as_bytes())
+    .map_err(|e| format!("feedback_image_save: base64 decode failed: {e}"))?;
+  if bytes.len() > MAX_FEEDBACK_IMAGE_BYTES {
+    return Err(format!(
+      "feedback_image_save: image too large ({} bytes, max {})",
+      bytes.len(),
+      MAX_FEEDBACK_IMAGE_BYTES
+    ));
+  }
+  if bytes.len() < 8 || &bytes[0..8] != b"\x89PNG\r\n\x1a\n" {
+    return Err("feedback_image_save: payload is not a PNG (magic bytes missing)".to_string());
+  }
+
+  let project_root = expand_tilde(&project_path);
+  if !project_root.exists() {
+    return Err(format!(
+      "feedback_image_save: project folder not found: {}",
+      project_root.display()
+    ));
+  }
+  let canon_root = project_root
+    .canonicalize()
+    .map_err(|e| format!("feedback_image_save: canonicalise project root: {e}"))?;
+
+  let feedback_dir = canon_root.join(".builder").join("feedback");
+  fs::create_dir_all(&feedback_dir)
+    .map_err(|e| format!("feedback_image_save: create .builder/feedback/: {e}"))?;
+
+  let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+  let filename = format!("fb-{}-{:09}.png", now.as_secs(), now.subsec_nanos());
+  let target = feedback_dir.join(&filename);
+
+  // Defence in depth: confirm the resolved write target is still under the
+  // project root after canonicalisation (catches symlink games + any future
+  // filename that sneaks in `..`). The filename is generated server-side so
+  // this is belt-and-braces, but cheap.
+  let canon_target_parent = target
+    .parent()
+    .ok_or_else(|| "feedback_image_save: target has no parent".to_string())?
+    .canonicalize()
+    .map_err(|e| format!("feedback_image_save: canonicalise target parent: {e}"))?;
+  if !canon_target_parent.starts_with(&canon_root) {
+    return Err("feedback_image_save: refused — write target escaped project root".to_string());
+  }
+
+  fs::write(&target, &bytes).map_err(|e| format!("feedback_image_save: write: {e}"))?;
+
+  // Return the path relative to the project root so the chat message reads
+  // ".builder/feedback/fb-...png" (Claude's Read tool resolves it inside cwd).
+  Ok(format!(".builder/feedback/{filename}"))
+}
+
+// Companion sidecar for feedback_image_save. Writes a JSON sidecar (e.g. mark
+// coordinates resolved to DOM elements, recent console events, iframe
+// snapshot) so the agent can correlate marks with browser-side context.
+//
+// Cap: 1 MB. Sidecars are mostly text + small element snippets; anything
+// bigger is almost certainly a bug or runaway DOM serialisation.
+
+const MAX_FEEDBACK_SIDECAR_BYTES: usize = 1 * 1024 * 1024;
+
+#[tauri::command]
+fn feedback_sidecar_save(
+  project_path: String,
+  content_json: String,
+) -> Result<String, String> {
+  use std::time::{SystemTime, UNIX_EPOCH};
+
+  if content_json.len() > MAX_FEEDBACK_SIDECAR_BYTES {
+    return Err(format!(
+      "feedback_sidecar_save: payload too large ({} bytes, max {})",
+      content_json.len(),
+      MAX_FEEDBACK_SIDECAR_BYTES
+    ));
+  }
+  // Validate it's actually JSON. We don't pin a schema (the schema lives in
+  // TypeScript and is allowed to evolve), but we want to reject obvious
+  // garbage at the trust boundary so the agent's Read tool doesn't choke.
+  serde_json::from_str::<serde_json::Value>(&content_json)
+    .map_err(|e| format!("feedback_sidecar_save: not valid JSON: {e}"))?;
+
+  let project_root = expand_tilde(&project_path);
+  if !project_root.exists() {
+    return Err(format!(
+      "feedback_sidecar_save: project folder not found: {}",
+      project_root.display()
+    ));
+  }
+  let canon_root = project_root
+    .canonicalize()
+    .map_err(|e| format!("feedback_sidecar_save: canonicalise project root: {e}"))?;
+
+  let feedback_dir = canon_root.join(".builder").join("feedback");
+  fs::create_dir_all(&feedback_dir)
+    .map_err(|e| format!("feedback_sidecar_save: create .builder/feedback/: {e}"))?;
+
+  let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+  let filename = format!("fb-{}-{:09}.json", now.as_secs(), now.subsec_nanos());
+  let target = feedback_dir.join(&filename);
+
+  let canon_target_parent = target
+    .parent()
+    .ok_or_else(|| "feedback_sidecar_save: target has no parent".to_string())?
+    .canonicalize()
+    .map_err(|e| format!("feedback_sidecar_save: canonicalise target parent: {e}"))?;
+  if !canon_target_parent.starts_with(&canon_root) {
+    return Err("feedback_sidecar_save: refused — write target escaped project root".to_string());
+  }
+
+  fs::write(&target, content_json.as_bytes())
+    .map_err(|e| format!("feedback_sidecar_save: write: {e}"))?;
+
+  Ok(format!(".builder/feedback/{filename}"))
+}
+
+// Auto-snapshot per agent edit (PR-4 of D-031). Stores a PNG of the iframe's
+// current state to .builder/snapshots/<ts>.png so the agent can read recent
+// snapshots and see how the build evolved over time.
+//
+// Cap: 50 most recent snapshots. Older ones are pruned on each save so the
+// folder doesn't grow unbounded.
+
+const TARGET_SNAPSHOT_KEEP: usize = 50;
+const MAX_TARGET_SNAPSHOT_BYTES: usize = 10 * 1024 * 1024;
+
+#[tauri::command]
+fn target_snapshot_save(
+  project_path: String,
+  content_base64: String,
+  label: Option<String>,
+) -> Result<String, String> {
+  use base64::Engine;
+  use std::time::{SystemTime, UNIX_EPOCH};
+
+  let bytes = base64::engine::general_purpose::STANDARD
+    .decode(content_base64.as_bytes())
+    .map_err(|e| format!("target_snapshot_save: base64 decode failed: {e}"))?;
+  if bytes.len() > MAX_TARGET_SNAPSHOT_BYTES {
+    return Err(format!(
+      "target_snapshot_save: image too large ({} bytes, max {})",
+      bytes.len(),
+      MAX_TARGET_SNAPSHOT_BYTES
+    ));
+  }
+  if bytes.len() < 8 || &bytes[0..8] != b"\x89PNG\r\n\x1a\n" {
+    return Err("target_snapshot_save: payload is not a PNG (magic bytes missing)".to_string());
+  }
+
+  let project_root = expand_tilde(&project_path);
+  if !project_root.exists() {
+    return Err(format!(
+      "target_snapshot_save: project folder not found: {}",
+      project_root.display()
+    ));
+  }
+  let canon_root = project_root
+    .canonicalize()
+    .map_err(|e| format!("target_snapshot_save: canonicalise project root: {e}"))?;
+
+  let snap_dir = canon_root.join(".builder").join("snapshots");
+  fs::create_dir_all(&snap_dir)
+    .map_err(|e| format!("target_snapshot_save: create .builder/snapshots/: {e}"))?;
+
+  let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+  // Sanitise the label to a small, filename-safe slug.
+  let slug = label
+    .map(|l| {
+      l.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect::<String>()
+        .chars()
+        .take(40)
+        .collect::<String>()
+    })
+    .filter(|s| !s.is_empty());
+  let filename = match slug {
+    Some(s) => format!("snap-{}-{:09}-{s}.png", now.as_secs(), now.subsec_nanos()),
+    None => format!("snap-{}-{:09}.png", now.as_secs(), now.subsec_nanos()),
+  };
+  let target = snap_dir.join(&filename);
+
+  let canon_target_parent = target
+    .parent()
+    .ok_or_else(|| "target_snapshot_save: target has no parent".to_string())?
+    .canonicalize()
+    .map_err(|e| format!("target_snapshot_save: canonicalise target parent: {e}"))?;
+  if !canon_target_parent.starts_with(&canon_root) {
+    return Err("target_snapshot_save: refused — write target escaped project root".to_string());
+  }
+
+  fs::write(&target, &bytes).map_err(|e| format!("target_snapshot_save: write: {e}"))?;
+
+  // Prune old snapshots so the folder doesn't grow unbounded.
+  if let Err(e) = prune_snapshots(&snap_dir, TARGET_SNAPSHOT_KEEP) {
+    log::debug!("target_snapshot_save: prune failed (non-fatal): {e}");
+  }
+
+  Ok(format!(".builder/snapshots/{filename}"))
+}
+
+fn prune_snapshots(dir: &std::path::Path, keep: usize) -> Result<(), String> {
+  let entries = fs::read_dir(dir).map_err(|e| format!("read_dir: {e}"))?;
+  let mut snaps: Vec<(std::time::SystemTime, std::path::PathBuf)> = vec![];
+  for entry in entries.flatten() {
+    let meta = match entry.metadata() {
+      Ok(m) => m,
+      Err(_) => continue,
+    };
+    if !meta.is_file() {
+      continue;
+    }
+    let path = entry.path();
+    if path.extension().and_then(|s| s.to_str()) != Some("png") {
+      continue;
+    }
+    let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    snaps.push((mtime, path));
+  }
+  if snaps.len() <= keep {
+    return Ok(());
+  }
+  snaps.sort_by(|a, b| a.0.cmp(&b.0));
+  let to_remove = snaps.len() - keep;
+  for (_, p) in snaps.into_iter().take(to_remove) {
+    let _ = fs::remove_file(p);
+  }
+  Ok(())
+}
+
+// Project creation file-system work per build-order.md A4c and Flow B AC1-AC3.
+// The DB insert + audit row are handled by the sidecar (`projects.create`); the
+// webview orchestrates the two halves via lib/project/index.ts.
+//
+// The novice's typed name is preserved as the display name in the projects
+// row; the folder name on disk is the sanitised form (lowercase, hyphens
+// for whitespace, only [a-z0-9._-]). Mirrors lib/project/index.ts
+// sanitiseProjectName.
+
+fn sanitise_project_name(raw: &str) -> Option<String> {
+  let mut s: String = raw.to_lowercase();
+  // Whitespace -> hyphen
+  let mut out = String::with_capacity(s.len());
+  let mut prev_was_dash = false;
+  for c in s.chars() {
+    if c.is_whitespace() {
+      if !prev_was_dash {
+        out.push('-');
+        prev_was_dash = true;
+      }
+      continue;
+    }
+    if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_' {
+      out.push(c);
+      prev_was_dash = false;
+      continue;
+    }
+    if c == '-' {
+      if !prev_was_dash {
+        out.push('-');
+        prev_was_dash = true;
+      }
+      continue;
+    }
+    // Drop any other character (punctuation, emoji, accented letters, etc.).
+  }
+  s = out;
+  // Trim leading/trailing punctuation.
+  let trimmed = s.trim_matches(|c| c == '.' || c == '-' || c == '_');
+  let mut s = trimmed.to_string();
+  if s.len() > 100 {
+    s.truncate(100);
+    while s
+      .chars()
+      .last()
+      .map(|c| c == '.' || c == '-' || c == '_')
+      .unwrap_or(false)
+    {
+      s.pop();
+    }
+  }
+  if s.is_empty() {
+    None
+  } else {
+    Some(s)
+  }
+}
+
+fn expand_tilde(path: &str) -> PathBuf {
+  if let Some(rest) = path.strip_prefix("~/") {
+    if let Some(home) = std::env::var_os("HOME") {
+      return PathBuf::from(home).join(rest);
+    }
+  }
+  PathBuf::from(path)
+}
+
+#[tauri::command]
+fn project_create_folder(name: String, folder: String) -> Result<String, String> {
+  let folder_name = sanitise_project_name(&name).ok_or_else(|| {
+    format!(
+      "project name '{name}' has no usable characters after sanitisation (need at least one letter or digit)"
+    )
+  })?;
+
+  let parent = expand_tilde(&folder);
+  fs::create_dir_all(&parent)
+    .map_err(|e| format!("failed to create parent folder {}: {e}", parent.display()))?;
+
+  // Reject parents inside the Builder's own source tree. Live test 2026-04-27
+  // showed that picking the Builder repo as the project parent caused the
+  // spawned claude to read the Builder's own .claude/ settings and lock the
+  // session. Cheaper to reject up front than debug the symptom.
+  if let Ok(canon_parent) = parent.canonicalize() {
+    if let Ok(builder_root) = sidecar::project_root_from_cwd() {
+      if canon_parent.starts_with(&builder_root) {
+        return Err(format!(
+          "Project folder is inside the Builder app's own source folder ({}). \
+           Pick a different parent folder — the recommended default is ~/Documents/ClaudeBuilds.",
+          builder_root.display()
+        ));
+      }
+    }
+  }
+
+  let project_root = parent.join(&folder_name);
+  if project_root.exists() {
+    return Err(format!(
+      "target folder already exists: {}",
+      project_root.display()
+    ));
+  }
+
+  fs::create_dir_all(&project_root)
+    .map_err(|e| format!("failed to create project folder {}: {e}", project_root.display()))?;
+  fs::create_dir_all(project_root.join(".builder"))
+    .map_err(|e| format!("failed to create .builder/: {e}"))?;
+  fs::create_dir_all(project_root.join("rules"))
+    .map_err(|e| format!("failed to create rules/: {e}"))?;
+
+  let claude_md_path = project_root.join("CLAUDE.md");
+  fs::write(&claude_md_path, TEMPLATE_CLAUDE_MD)
+    .map_err(|e| format!("failed to write CLAUDE.md: {e}"))?;
+  fs::write(project_root.join("spec.md"), TEMPLATE_SPEC_MD)
+    .map_err(|e| format!("failed to write spec.md: {e}"))?;
+  fs::write(project_root.join(".builder").join("state.json"), TEMPLATE_BUILDER_STATE)
+    .map_err(|e| format!("failed to write .builder/state.json: {e}"))?;
+  fs::write(project_root.join("rules").join("README.md"), TEMPLATE_RULES_README)
+    .map_err(|e| format!("failed to write rules/README.md: {e}"))?;
+  fs::write(
+    project_root.join("rules").join("david-easter-egg.md"),
+    TEMPLATE_DAVID_EASTER_EGG,
+  )
+  .map_err(|e| format!("failed to write rules/david-easter-egg.md: {e}"))?;
+
+  // Project-local Claude Code settings: blanket-allow EVERY tool inside
+  // this folder. Without this, the spawned claude reads any user-level
+  // ~/.claude/settings.json with restrictive paths and ends up "locked
+  // to src-tauri/" or similar (live tested 2026-04-27). This file takes
+  // precedence over user-level rules per Claude Code's settings layering.
+  fs::create_dir_all(project_root.join(".claude"))
+    .map_err(|e| format!("failed to create .claude/: {e}"))?;
+  let claude_settings_path = project_root.join(".claude").join("settings.local.json");
+  // Claude Code permission rules are tool-prefixed (Bash(*), Read(**), etc.)
+  // — a bare "*" is NOT a wildcard. defaultMode: bypassPermissions is the
+  // load-bearing line, allow[] is belt-and-braces.
+  fs::write(
+    &claude_settings_path,
+    "{\n  \"permissions\": {\n    \"defaultMode\": \"bypassPermissions\",\n    \"allow\": [\n      \"Bash(*)\",\n      \"Read(**)\",\n      \"Write(**)\",\n      \"Edit(**)\",\n      \"Glob(**)\",\n      \"Grep(**)\",\n      \"Task(*)\",\n      \"WebFetch(*)\",\n      \"WebSearch(*)\",\n      \"TodoWrite(*)\",\n      \"NotebookEdit(**)\"\n    ],\n    \"deny\": []\n  }\n}\n",
+  )
+  .map_err(|e| format!("failed to write .claude/settings.local.json: {e}"))?;
+
+  let git_init = Command::new("git")
+    .arg("init")
+    .arg("--quiet")
+    .current_dir(&project_root)
+    .output()
+    .map_err(|e| format!("failed to spawn git: {e}"))?;
+  if !git_init.status.success() {
+    return Err(format!(
+      "git init failed: {}",
+      String::from_utf8_lossy(&git_init.stderr)
+    ));
+  }
+
+  Path::new(&project_root)
+    .canonicalize()
+    .map(|p| p.display().to_string())
+    .map_err(|e| format!("failed to canonicalise project path: {e}"))
+}
+
+/// Capture the user's login-shell PATH and use it as the process PATH
+/// so every child process (sidecar, node, claude, gh, vercel) inherits
+/// the same environment a terminal user would see. Without this, a
+/// Finder/Dock-launched .app on macOS gets a minimal PATH that misses
+/// Homebrew, npm-global, NVM, Bun, Volta, etc. Standard fix used by
+/// most Electron apps (cf. fix-path / shell-env). Skipped on Windows
+/// where the GUI shell PATH is normally complete.
+fn augment_path_from_login_shell() {
+  if cfg!(target_os = "windows") {
+    return;
+  }
+  let (program, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
+    // -i interactive so .zshrc gets sourced (-l alone only sources
+    // .zprofile / .zlogin, which often don't set PATH).
+    ("/bin/zsh", &["-ilc", "echo \"__DAVE_PATH__:$PATH\""])
+  } else {
+    ("/bin/bash", &["-ilc", "echo \"__DAVE_PATH__:$PATH\""])
+  };
+  let output = match Command::new(program).args(args).output() {
+    Ok(o) if o.status.success() => o,
+    _ => return,
+  };
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  // Look for our sentinel-prefixed line so prompt noise from .zshrc /
+  // .bashrc (e.g. nvm chatter) doesn't get treated as PATH.
+  for line in stdout.lines() {
+    if let Some(rest) = line.strip_prefix("__DAVE_PATH__:") {
+      let new_path = rest.trim();
+      if !new_path.is_empty() {
+        log::info!(
+          "augmented PATH from login shell ({} entries)",
+          new_path.split(':').count()
+        );
+        std::env::set_var("PATH", new_path);
+      }
+      return;
+    }
+  }
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+  // Run BEFORE Tauri's builder kicks off any child processes. Side
+  // effects: sets the process PATH so every later Command::new inherits
+  // the user's full shell PATH.
+  augment_path_from_login_shell();
+
+  tauri::Builder::default()
+    .setup(|app| {
+      // Resolve the bundled CLI directory once (ADR-0009). Free
+      // functions read it via OnceLock without needing AppHandle, so
+      // the existing resolver shape is unchanged.
+      let bundled_dir = app
+        .path()
+        .resource_dir()
+        .ok()
+        .map(|r| r.join("claude-cli-bundle"))
+        .filter(|p| p.exists());
+      if let Some(ref p) = bundled_dir {
+        log::info!("bundled claude CLI present at {}", p.display());
+        // Append the bundle's bin dir to the process PATH so child
+        // processes — most importantly the Node sidecar, which spawns
+        // `claude` via the Agent SDK — can find the bundled wrapper
+        // when no system install is present. Append (not prepend) so a
+        // system install takes precedence per ADR-0009.
+        let bin_dir = p.join("node_modules").join(".bin");
+        if bin_dir.exists() {
+          let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
+          let current = std::env::var("PATH").unwrap_or_default();
+          let next = if current.is_empty() {
+            bin_dir.display().to_string()
+          } else {
+            format!("{current}{sep}{}", bin_dir.display())
+          };
+          std::env::set_var("PATH", next);
+          log::info!(
+            "appended bundled CLI bin dir to PATH: {}",
+            bin_dir.display()
+          );
+        }
+      } else {
+        log::info!("no bundled claude CLI in resources; relying on system install");
+      }
+      let _ = BUNDLED_CLAUDE_CLI_DIR.set(bundled_dir);
+
+      let state = SidecarState::new();
+
+      // Best-effort spawn. If it fails (e.g. sidecar not built), log and continue;
+      // sidecar_rpc will return a clear error for any subsequent calls.
+      match spawn_sidecar(
+        &app.handle(),
+        state.pending.clone(),
+        state.channels.clone(),
+      ) {
+        Ok(handle) => {
+          if let Ok(mut guard) = state.handle.lock() {
+            *guard = Some(handle);
+            log::info!("sidecar spawned");
+          }
+        }
+        Err(e) => {
+          log::warn!("sidecar spawn failed: {e}; sidecar_rpc will return errors");
+        }
+      }
+
+      app.manage(state);
+      app.manage(OrchestratorState::new());
+      app.manage(LaunchState::new());
+      app.manage(PreviewProxyState::new());
+
+      // Tauri auto-updater (Flow J AC1-AC3). The actual signed feed +
+      // pubkey are provisioned in Phase E0 (deferred per human direction
+      // 2026-04-25). The plugin is wired now so all that's needed when
+      // E0 lands is to swap the placeholder pubkey + endpoint in
+      // tauri.conf.json — no code change. Drift D-017 documents the gap.
+      app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+
+      // Native folder picker for the new-project form (UX1).
+      app.handle().plugin(tauri_plugin_dialog::init())?;
+
+      if cfg!(debug_assertions) {
+        app.handle().plugin(
+          tauri_plugin_log::Builder::default()
+            .level(log::LevelFilter::Info)
+            .build(),
+        )?;
+      }
+      Ok(())
+    })
+    .invoke_handler(tauri::generate_handler![
+      keychain_get,
+      keychain_set,
+      keychain_delete,
+      cli_is_installed,
+      cli_is_authenticated,
+      cli_resolution_diagnostics,
+      cli_auth_diagnostics,
+      node_npm_diagnostics,
+      project_create_folder,
+      file_save_uploaded,
+      feedback_image_save,
+      feedback_sidecar_save,
+      target_snapshot_save,
+      capture_region_to_png,
+      read_target_state,
+      read_target_spec,
+      read_review_md,
+      read_history_log_tail,
+      write_target_spec,
+      backup_target_spec,
+      append_drift_log_line,
+      build_capability_check,
+      chat_send,
+      chat_stop,
+      orchestrator_start,
+      orchestrator_stop,
+      research_start,
+      research_stop,
+      vercel_is_installed,
+      vercel_deploy,
+      gh_is_installed,
+      gh_export,
+      target_app_launch,
+      target_app_stop,
+      target_app_write_launch_scripts,
+      sidecar_rpc,
+      sidecar_rpc_stream
+    ])
+    .run(tauri::generate_context!())
+    .expect("error while running tauri application");
+}

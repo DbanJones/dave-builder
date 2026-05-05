@@ -1,0 +1,87 @@
+name: Release
+
+# Multi-platform Tauri build. Triggered by tag pushes (v*) or manual
+# dispatch. Produces unsigned .msi (Windows) and .dmg (macOS, both arches)
+# attached to a draft GitHub Release. Code-signing is intentionally
+# absent — see ADR-0009 / spec.md §6 (NFR allows unsigned builds for v0.1).
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tagName:
+        description: "Tag to publish (e.g. v0.1.0). Created from current branch HEAD."
+        required: true
+      draft:
+        description: "Publish as draft release"
+        required: false
+        default: "true"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: "--target aarch64-apple-darwin"
+          - platform: macos-latest
+            args: "--target x86_64-apple-darwin"
+          - platform: windows-latest
+            args: ""
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Enable Corepack + pin pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@9.15.0 --activate
+        shell: bash
+
+      - name: Set up Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # macos-latest is Apple Silicon; we still need x86_64 target for
+          # the Intel build branch of the matrix.
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Cache Cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
+      - name: Install root deps
+        run: corepack pnpm install --frozen-lockfile
+
+      - name: Install sidecar deps
+        run: corepack pnpm --dir sidecar install --frozen-lockfile
+
+      - name: Build with tauri-action
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.event.inputs.tagName || github.ref_name }}
+          releaseName: "Dave-Builder ${{ github.event.inputs.tagName || github.ref_name }}"
+          releaseBody: |
+            Unsigned build of Dave-Builder. Windows SmartScreen and macOS
+            Gatekeeper will warn on first launch — see README for the
+            right-click "Open" workaround on Mac.
+
+            Built from commit ${{ github.sha }}.
+          releaseDraft: ${{ github.event.inputs.draft || 'true' }}
+          prerelease: false
+          args: ${{ matrix.args }}
