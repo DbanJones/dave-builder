@@ -1,26 +1,23 @@
 name: Release
 
 # Multi-platform Tauri build. Triggered by tag pushes (v*) or manual
-# dispatch. Produces unsigned .msi (Windows) and .dmg (macOS, both arches)
-# attached to a draft GitHub Release. Code-signing is intentionally
-# absent — see ADR-0009 / spec.md §6 (NFR allows unsigned builds for v0.1).
+# dispatch. Produces unsigned .msi (Windows), .dmg (macOS, both arches)
+# and attaches them to a draft GitHub Release. Replaces the old
+# release-windows.yml — Mac matrix arms added per ADR-0009 follow-up.
+#
+# Code-signing is intentionally absent — see ADR-0017 / spec.md §6
+# (NFR allows unsigned builds for v0.1). When E0 lands, set
+# TAURI_SIGNING_PRIVATE_KEY (+ password) as repo secrets and the
+# .msi / .dmg become signed for the in-app updater.
 
 on:
   push:
     tags:
       - "v*"
   workflow_dispatch:
-    inputs:
-      tagName:
-        description: "Tag to publish (e.g. v0.1.0). Created from current branch HEAD."
-        required: true
-      draft:
-        description: "Publish as draft release"
-        required: false
-        default: "true"
 
-permissions:
-  contents: write
+env:
+  NEXT_TELEMETRY_DISABLED: "1"
 
 jobs:
   build:
@@ -30,58 +27,84 @@ jobs:
         include:
           - platform: macos-latest
             args: "--target aarch64-apple-darwin"
+            cache-key: tauri-macos-arm64
           - platform: macos-latest
             args: "--target x86_64-apple-darwin"
+            cache-key: tauri-macos-x64
           - platform: windows-latest
             args: ""
+            cache-key: tauri-windows
 
+    name: Build (${{ matrix.platform }} ${{ matrix.args }})
     runs-on: ${{ matrix.platform }}
+    permissions:
+      contents: write # needed to attach artifacts to a release on tag push
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Node 22
-        uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@v4
         with:
-          node-version: "22"
+          version: 9.15.0
 
-      - name: Enable Corepack + pin pnpm
-        run: |
-          corepack enable
-          corepack prepare pnpm@9.15.0 --activate
-        shell: bash
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
 
-      - name: Set up Rust stable
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          # macos-latest is Apple Silicon; we still need x86_64 target for
-          # the Intel build branch of the matrix.
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
-      - name: Cache Cargo registry + target
+      - name: Cache Rust target
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: "src-tauri -> target"
+          workspaces: src-tauri
+          shared-key: ${{ matrix.cache-key }}
 
-      - name: Install root deps
+      - name: Install JS dependencies (root)
         run: corepack pnpm install --frozen-lockfile
 
-      - name: Install sidecar deps
+      # Sidecar is a sibling package, not a workspace member — root
+      # install does not pull its deps. Without this, `pnpm sidecar:build`
+      # in tauri-action's beforeBuildCommand fails on every drizzle-orm /
+      # ulid / better-sqlite3 import.
+      - name: Install JS dependencies (sidecar)
         run: corepack pnpm --dir sidecar install --frozen-lockfile
 
-      - name: Build with tauri-action
+      - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.event.inputs.tagName || github.ref_name }}
-          releaseName: "Dave-Builder ${{ github.event.inputs.tagName || github.ref_name }}"
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          releaseName: "Dave-Builder ${{ github.ref_type == 'tag' && github.ref_name || github.run_number }}"
           releaseBody: |
-            Unsigned build of Dave-Builder. Windows SmartScreen and macOS
-            Gatekeeper will warn on first launch — see README for the
-            right-click "Open" workaround on Mac.
+            Unsigned multi-platform build of Dave-Builder.
 
-            Built from commit ${{ github.sha }}.
-          releaseDraft: ${{ github.event.inputs.draft || 'true' }}
+            * `.msi` / `*-setup.exe` — Windows installers.
+            * `.dmg` (aarch64) — Apple Silicon Mac.
+            * `.dmg` (x86_64) — Intel Mac.
+
+            Not code-signed (no Apple Developer ID or Authenticode cert
+            yet). Windows SmartScreen warns on first run; on macOS,
+            right-click → Open the first time to bypass Gatekeeper.
+          releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+      # On manual runs (no tag), tauri-action does not upload to a
+      # release — surface bundles as workflow artifacts instead.
+      - name: Upload installers as workflow artifacts
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dave-${{ matrix.platform }}-${{ matrix.args || 'default' }}-installers
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/macos/*.app
+          if-no-files-found: warn
+          retention-days: 30
